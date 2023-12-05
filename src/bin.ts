@@ -1,6 +1,6 @@
 import type { OpaqueString } from "typeroo/string";
 import { watch } from "chokidar";
-import { readFile } from "fs/promises";
+import { readFile, writeFile } from "fs/promises";
 import { glob } from "glob";
 import { dirname, relative, resolve } from "path";
 import picocolors from "picocolors";
@@ -45,12 +45,7 @@ async function processWorkspaceAdd(absolutePath: AbsolutePackageJSONPath) {
   debug("Detected workspace package.json", path);
 
   const workspacePath = packageJSONPathToWorkspacePath(path);
-  const name = workspaceNames[workspacePath];
-
-  if (!name) {
-    error("Internal error: workspace name not found");
-    process.exit(1);
-  }
+  const name = getWorkspaceName(workspacePath);
 
   debug("Watching workspace", name, `(${dirname(path)})`);
 
@@ -97,18 +92,14 @@ function watchBuildInfos() {
 }
 
 async function processBuildInfoAdd(absolutePath: AbsoluteBuildInfoPath) {
-  const path = relativeBuildInfoPath(absolutePath);
-  debug("Detected build info", path);
+  const buildInfoPath = relativeBuildInfoPath(absolutePath);
+  debug("Detected build info", buildInfoPath);
 
-  const dependencies = await buildInfoDependencies(path);
-  debug("Found build info dependencies", path, dependencies);
+  const buildInfoDependencies = await getBuildInfoDependencies(buildInfoPath);
+  debug("Found build info dependencies", buildInfoPath, buildInfoDependencies);
 
-  const workspacePath = buildInfoPathToWorkspacePath(path);
-  const name = workspaceNames[workspacePath];
-  if (!name) {
-    error("Internal error: workspace name not found", name);
-    process.exit(1);
-  }
+  const workspacePath = buildInfoPathToWorkspacePath(buildInfoPath);
+  const name = getWorkspaceName(workspacePath);
 
   const workspaceDeps = workspaceDependencies[name];
   if (!workspaceDeps) {
@@ -116,8 +107,11 @@ async function processBuildInfoAdd(absolutePath: AbsoluteBuildInfoPath) {
     process.exit(1);
   }
 
-  const missing = findMissingDependencies(workspaceDeps, dependencies);
-  const redundant = findRedundantDependencies(workspaceDeps, dependencies);
+  const missing = findMissingDependencies(workspaceDeps, buildInfoDependencies);
+  const redundant = findRedundantDependencies(
+    workspaceDeps,
+    buildInfoDependencies
+  );
 
   if (missing.length) {
     warn(
@@ -150,6 +144,24 @@ async function processBuildInfoAdd(absolutePath: AbsoluteBuildInfoPath) {
     )}`
     );
   }
+
+  await mutateTSConfig(getTSConfigPath(workspacePath), (tsConfig) => {
+    const references = dependeciesToReferences(
+      workspacePath,
+      buildInfoDependencies
+    );
+    const referencesUnchanged = areArraysEqual(
+      references,
+      tsConfig?.references || []
+    );
+    if (referencesUnchanged) return false;
+    log(
+      `Writing ${blue(
+        getWorkspaceName(workspacePath)
+      )} tsconfig.json with updated references list`
+    );
+    debug("References:", references);
+  });
 }
 
 function processBuildInfoChange(absolutePath: AbsoluteBuildInfoPath) {
@@ -162,6 +174,18 @@ function processBuildInfoUnlink(absolutePath: AbsoluteBuildInfoPath) {
   const path = relativeBuildInfoPath(absolutePath);
   debug("Detected build info unlink", path);
   throw new Error("Function not implemented.");
+}
+
+function dependeciesToReferences(
+  workspacePath: WorkspacePath,
+  dependencies: WorkspaceName[]
+): TSConfigReference[] {
+  return dependencies.map((dependencyName) => ({
+    path: getRelativeWorkspacePath(
+      getWorkspacePath(dependencyName),
+      workspacePath
+    ),
+  }));
 }
 
 function watchBuildInfo(workspace: WorkspacePath) {
@@ -234,32 +258,23 @@ async function readWorkspaces(): Promise<WorkspacePath[]> {
   return workspaces;
 }
 
-async function buildInfoDependencies(
+async function getBuildInfoDependencies(
   buildInfoPath: BuildInfoPath
 ): Promise<WorkspaceName[]> {
   const buildInfo = await readBuildInfo(buildInfoPath);
   const workspacePath = buildInfoPathToWorkspacePath(buildInfoPath);
-  const workspaceName = workspaceNames[workspacePath];
-  if (!workspaceName) {
-    error("Internal error: workspace name not found", workspaceName);
-    process.exit(1);
-  }
+  const workspaceName = getWorkspaceName(workspacePath);
 
   const deps = new Set<WorkspaceName>();
 
   buildInfo.program.fileNames.forEach((buildInfoFile) => {
     const file = buildInfoFileToWorkspaceFile(buildInfoPath, buildInfoFile);
-    const workspace = watchedWorkspaces.find((workspace) =>
+    const workspacePath = watchedWorkspaces.find((workspace) =>
       belongsToWorkspace(file, workspace)
     );
-    if (!workspace) return;
+    if (!workspacePath) return;
 
-    const name = workspaceNames[workspace];
-    if (!name) {
-      error("Internal error: workspace name not found", name);
-      process.exit(1);
-    }
-
+    const name = getWorkspaceName(workspacePath);
     if (name !== workspaceName) deps.add(name);
   });
 
@@ -279,6 +294,26 @@ function buildInfoFileToWorkspaceFile(
     root,
     resolve(dirname(buildInfoPath), file)
   ) as WorkspaceFilePath;
+}
+
+function getWorkspaceName(workspacePath: WorkspacePath) {
+  const name = workspaceNames[workspacePath];
+  if (!name) {
+    error("Internal error: workspace name not found", workspacePath);
+    process.exit(1);
+  }
+  return name;
+}
+
+function getWorkspacePath(workspaceName: WorkspaceName) {
+  const path = Object.entries(workspaceNames).find(
+    ([, name]) => name === workspaceName
+  )?.[0];
+  if (!path) {
+    error("Internal error: workspace path not found", workspaceName);
+    process.exit(1);
+  }
+  return path as WorkspacePath;
 }
 
 function belongsToWorkspace(file: WorkspaceFilePath, workspace: WorkspacePath) {
@@ -331,6 +366,10 @@ function buildInfoPathToWorkspacePath(buildInfoPath: BuildInfoPath) {
   return relative(root, resolve(dirname(buildInfoPath), "..")) as WorkspacePath;
 }
 
+function areArraysEqual<Type extends any>(a: Type[], b: Type[]) {
+  return a.length === b.length && a.every((item) => b.includes(item));
+}
+
 function findMissingDependencies(
   actual: WorkspaceName[],
   required: WorkspaceName[]
@@ -343,6 +382,33 @@ function findRedundantDependencies(
   required: WorkspaceName[]
 ) {
   return actual.filter((item) => !required.includes(item));
+}
+
+async function readTSConfig(path: TSConfigPath) {
+  const content = await readFile(path, "utf-8");
+  return JSON.parse(content) as TSConfig;
+}
+
+async function mutateTSConfig(
+  path: TSConfigPath,
+  mutator: (tsConfig: TSConfig) => boolean | void
+) {
+  const tsConfig = await readTSConfig(path);
+  const skipWrite = !mutator(tsConfig);
+  if (skipWrite) return;
+  const content = JSON.stringify(tsConfig, null, 2);
+  await writeFile(path, content);
+}
+
+function getTSConfigPath(workspace: WorkspacePath) {
+  return relative(root, resolve(workspace, "tsconfig.json")) as TSConfigPath;
+}
+
+function getRelativeWorkspacePath(
+  dependency: WorkspacePath,
+  workspace?: WorkspacePath
+) {
+  return relative(workspace || root, dependency) as RelativeWorkspacePath;
 }
 
 function debug(...message: any[]) {
@@ -374,30 +440,43 @@ interface PackageJSON {
   workspaces?: string[];
 }
 
-export type AbsolutePackageJSONPath = OpaqueString<
+interface TSConfig {
+  files?: string[];
+  references?: TSConfigReference[];
+}
+
+interface TSConfigReference {
+  path: RelativeWorkspacePath;
+}
+
+type AbsolutePackageJSONPath = OpaqueString<
   typeof absolutePackageJSONPathBrand
 >;
 declare const absolutePackageJSONPathBrand: unique symbol;
 
-export type PackageJSONPath = OpaqueString<typeof packageJSONPathBrand>;
+type PackageJSONPath = OpaqueString<typeof packageJSONPathBrand>;
 declare const packageJSONPathBrand: unique symbol;
 
-export type WorkspacePath = OpaqueString<typeof workspacePathBrand>;
+type WorkspacePath = OpaqueString<typeof workspacePathBrand>;
 declare const workspacePathBrand: unique symbol;
 
-export type WorkspaceName = OpaqueString<typeof workspaceNameBrand>;
+type RelativeWorkspacePath = OpaqueString<typeof relativeWorkspacePathBrand>;
+declare const relativeWorkspacePathBrand: unique symbol;
+
+type WorkspaceName = OpaqueString<typeof workspaceNameBrand>;
 declare const workspaceNameBrand: unique symbol;
 
-export type BuildInfoPath = OpaqueString<typeof buildInfoPathBrand>;
+type BuildInfoPath = OpaqueString<typeof buildInfoPathBrand>;
 declare const buildInfoPathBrand: unique symbol;
 
-export type AbsoluteBuildInfoPath = OpaqueString<
-  typeof absoluteBuildInfoPathBrand
->;
+type AbsoluteBuildInfoPath = OpaqueString<typeof absoluteBuildInfoPathBrand>;
 declare const absoluteBuildInfoPathBrand: unique symbol;
 
-export type WorkspaceFilePath = OpaqueString<typeof workspaceFilePathBrand>;
+type WorkspaceFilePath = OpaqueString<typeof workspaceFilePathBrand>;
 declare const workspaceFilePathBrand: unique symbol;
 
-export type BuildInfoFilePath = OpaqueString<typeof buildInfoFilePathBrand>;
+type BuildInfoFilePath = OpaqueString<typeof buildInfoFilePathBrand>;
 declare const buildInfoFilePathBrand: unique symbol;
+
+type TSConfigPath = OpaqueString<typeof tsConfigPathBrand>;
+declare const tsConfigPathBrand: unique symbol;
