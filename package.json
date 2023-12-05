@@ -1,0 +1,40 @@
+{
+  "name": "tsrf",
+  "version": "0.0.0",
+  "description": "Build tool that marries npm workspaces with TypeScript references",
+  "main": "index.js",
+  "bin": {
+    "tsrf": "./bin.js"
+  },
+  "type": "module",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kossnocorp/tsrf.git"
+  },
+  "keywords": [
+    "TypeScript",
+    "references",
+    "monorepo",
+    "npm",
+    "workspaces"
+  ],
+  "author": "Sasha Koss <koss@nocorp.me>",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/kossnocorp/tsrf/issues"
+  },
+  "homepage": "https://github.com/kossnocorp/tsrf#readme",
+  "devDependencies": {
+    "typeroo": "^0.14.0",
+    "typescript": "^5.3.2"
+  },
+  "dependencies": {
+    "@types/node": "^20.10.3",
+    "chokidar": "^3.5.3",
+    "glob": "^10.3.10",
+    "picocolors": "^1.0.0"
+  }
+}
