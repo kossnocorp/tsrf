@@ -4,6 +4,7 @@ import { glob } from "glob";
 import { dirname, relative, resolve } from "path";
 import picocolors from "picocolors";
 import { format } from "prettier";
+import type { OpaqueNumber } from "typeroo/number";
 import type { OpaqueString } from "typeroo/string";
 
 const { red, yellow, green, gray, blue } = picocolors;
@@ -140,7 +141,15 @@ async function processBuildInfoUpdate(
     );
   }
 
-  const buildInfoDependencies = await getBuildInfoDependencies(buildInfoPath);
+  let buildInfoDependencies: WorkspaceName[];
+  try {
+    buildInfoDependencies = await getBuildInfoDependencies(buildInfoPath);
+  } catch (err) {
+    error("Failed to get build info dependencies", buildInfoPath);
+    log(err);
+    return;
+  }
+
   debug("Found build info dependencies", buildInfoPath, buildInfoDependencies);
 
   const workspaceDeps = getWorkspaceDependencies(workspaceName);
@@ -373,13 +382,24 @@ async function readWorkspaces(): Promise<WorkspacePath[]> {
 async function getBuildInfoDependencies(
   buildInfoPath: BuildInfoPath
 ): Promise<WorkspaceName[]> {
-  const buildInfo = await readBuildInfo(buildInfoPath);
+  const buildInfo = await withRetry(() => readBuildInfo(buildInfoPath), 50, 10);
+
   const workspacePath = buildInfoPathToWorkspacePath(buildInfoPath);
   const workspaceName = getWorkspaceName(workspacePath);
 
+  const indices = getLocalBuildInfoFileIndices(buildInfo);
+  const allFileNames = new Set<BuildInfoFileName>();
+
+  for (const index of indices) {
+    const listIds = getListIds(index, buildInfo);
+    const listFileIds = getListsFileIds(listIds, buildInfo);
+    const fileNames = getFileNames(listFileIds, buildInfo);
+    fileNames.forEach((fileName) => allFileNames.add(fileName));
+  }
+
   const deps = new Set<WorkspaceName>();
 
-  buildInfo.program.fileNames.forEach((buildInfoFile) => {
+  allFileNames.forEach((buildInfoFile) => {
     const file = buildInfoFileToWorkspaceFile(buildInfoPath, buildInfoFile);
     const workspacePath = watchedWorkspaces.find((workspace) =>
       belongsToWorkspace(file, workspace)
@@ -393,6 +413,67 @@ async function getBuildInfoDependencies(
   return [...deps];
 }
 
+const localBuildInfoFileRE = /^(?!.*(?:\.\.\/\.\.\/|\.\.\/node_modules))/;
+
+function getLocalBuildInfoFileIndices(buildInfo: BuildInfo) {
+  const indices: BuildInfoFileIndex[] = [];
+  for (const [indexStr, fileName] of Object.entries(
+    buildInfo.program.fileNames
+  )) {
+    const index = parseInt(indexStr) as BuildInfoFileIndex;
+    if (localBuildInfoFileRE.test(fileName)) indices.push(index);
+  }
+  return indices;
+}
+
+function getListIds(
+  fileIndex: BuildInfoFileIndex,
+  buildInfo: BuildInfo
+): BuildInfoListId[] {
+  const fileId = buildInfoFileIndexToId(fileIndex);
+  return (
+    buildInfo.program.referencedMap
+      ?.filter(([refFileId]) => refFileId === fileId)
+      ?.map(([_, listId]) => listId) || []
+  );
+}
+
+function getListsFileIds(
+  listIds: BuildInfoListId[],
+  buildInfo: BuildInfo
+): BuildInfoFileId[] {
+  const fileIds = new Set<BuildInfoFileId>();
+  for (const listId of listIds) {
+    const listIndex = buildInfoListIdToIndex(listId);
+    const listFileIds = buildInfo.program.fileIdsList?.[listIndex];
+    listFileIds?.forEach((fileId) => fileIds.add(fileId));
+  }
+  return [...fileIds];
+}
+
+function getFileNames(
+  fileIds: BuildInfoFileId[],
+  buildInfo: BuildInfo
+): BuildInfoFileName[] {
+  return fileIds
+    .map(
+      (fileId) => buildInfo.program.fileNames[buildInfoFileIdToIndex(fileId)]
+    )
+    .filter((f) => !!f) as BuildInfoFileName[];
+}
+
+function buildInfoListIdToIndex(id: BuildInfoListId) {
+  return (id - 1) as BuildInfoListIndex;
+}
+
+function buildInfoFileIndexToId(index: BuildInfoFileIndex) {
+  return (index + 1) as BuildInfoFileId;
+}
+
+function buildInfoFileIdToIndex(id: BuildInfoFileId) {
+  return (id - 1) as BuildInfoFileIndex;
+}
+
 async function readBuildInfo(path: BuildInfoPath) {
   const content = await readFile(path, "utf-8");
   return JSON.parse(content) as BuildInfo;
@@ -400,7 +481,7 @@ async function readBuildInfo(path: BuildInfoPath) {
 
 function buildInfoFileToWorkspaceFile(
   buildInfoPath: BuildInfoPath,
-  file: BuildInfoFilePath
+  file: BuildInfoFileName
 ) {
   return relative(
     root,
@@ -560,9 +641,33 @@ function error(...message: any[]) {
   console.error(red("Error:"), ...message, "\n");
 }
 
+async function withRetry<Type>(
+  fn: () => Promise<Type>,
+  maxRetries: number,
+  baseDelay: number
+): Promise<Type> {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (attempt >= maxRetries) throw error;
+      const delayTime = baseDelay * Math.pow(1.6, attempt);
+      await delay(delayTime);
+      attempt++;
+    }
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 interface BuildInfo {
   program: {
-    fileNames: BuildInfoFilePath[];
+    fileNames: Record<BuildInfoFileIndex, BuildInfoFileName>;
+    referencedMap?: [BuildInfoFileId, BuildInfoListId][];
+    fileIdsList?: Record<BuildInfoListIndex, BuildInfoFileId[]>;
   };
 }
 
@@ -624,8 +729,20 @@ declare const absoluteBuildInfoPathBrand: unique symbol;
 type WorkspaceFilePath = OpaqueString<typeof workspaceFilePathBrand>;
 declare const workspaceFilePathBrand: unique symbol;
 
-type BuildInfoFilePath = OpaqueString<typeof buildInfoFilePathBrand>;
-declare const buildInfoFilePathBrand: unique symbol;
-
 type TSConfigPath = OpaqueString<typeof tsConfigPathBrand>;
 declare const tsConfigPathBrand: unique symbol;
+
+type BuildInfoFileId = OpaqueNumber<typeof buildInfoFileIdBrand>;
+declare const buildInfoFileIdBrand: unique symbol;
+
+type BuildInfoFileIndex = OpaqueNumber<typeof buildInfoFileIndexBrand>;
+declare const buildInfoFileIndexBrand: unique symbol;
+
+type BuildInfoFileName = OpaqueString<typeof buildInfoFileNameBrand>;
+declare const buildInfoFileNameBrand: unique symbol;
+
+type BuildInfoListId = OpaqueNumber<typeof buildInfoListIdBrand>;
+declare const buildInfoListIdBrand: unique symbol;
+
+type BuildInfoListIndex = OpaqueNumber<typeof buildInfoListIndexBrand>;
+declare const buildInfoListIndexBrand: unique symbol;
