@@ -52,7 +52,7 @@ async function processWorkspaceAdd(absolutePath: AbsolutePackageJSONPath) {
   debug("Watching workspace", name, `(${dirname(path)})`);
 
   const packageJSON = await readPackageJSON(path);
-  const dependencies = getWorkspaceDependenciesFromPackageJSON(packageJSON);
+  const dependencies = extractWorkspaceDependenciesFromPackageJSON(packageJSON);
 
   debug("Found workspace dependencies", name, dependencies);
   workspaceDependencies[name] = dependencies;
@@ -93,55 +93,104 @@ function watchBuildInfos() {
   return buildInfoWatch;
 }
 
+const unlinkedBuildInfos = new Set<BuildInfoPath>();
+
 async function processBuildInfoAdd(absolutePath: AbsoluteBuildInfoPath) {
+  return processBuildInfoUpdate(absolutePath, true);
+}
+
+async function processBuildInfoChange(absolutePath: AbsoluteBuildInfoPath) {
+  return processBuildInfoUpdate(absolutePath, false);
+}
+
+function processBuildInfoUnlink(absolutePath: AbsoluteBuildInfoPath) {
   const buildInfoPath = relativeBuildInfoPath(absolutePath);
-  debug("Detected build info", buildInfoPath);
+  debug("Detected build info unlink", buildInfoPath);
+
+  const workspacePath = buildInfoPathToWorkspacePath(buildInfoPath);
+  const workspaceName = getWorkspaceName(workspacePath);
+
+  warn(
+    `The ${blue(
+      workspaceName
+    )} tsconfig.tsbuildinfo has been deleted, pausing processing`
+  );
+
+  unlinkedBuildInfos.add(buildInfoPath);
+}
+
+const commandsReported = new Set<string>();
+
+async function processBuildInfoUpdate(
+  absolutePath: AbsoluteBuildInfoPath,
+  add?: boolean
+) {
+  const buildInfoPath = relativeBuildInfoPath(absolutePath);
+  debug(`Detected build ${add ? "add" : "change"}`, buildInfoPath);
+
+  const workspacePath = buildInfoPathToWorkspacePath(buildInfoPath);
+  const workspaceName = getWorkspaceName(workspacePath);
+
+  if (add && unlinkedBuildInfos.has(buildInfoPath)) {
+    unlinkedBuildInfos.delete(buildInfoPath);
+    log(
+      `The ${blue(
+        workspaceName
+      )} tsconfig.tsbuildinfo has been created, resuming processing`
+    );
+  }
 
   const buildInfoDependencies = await getBuildInfoDependencies(buildInfoPath);
   debug("Found build info dependencies", buildInfoPath, buildInfoDependencies);
 
-  const workspacePath = buildInfoPathToWorkspacePath(buildInfoPath);
-  const name = getWorkspaceName(workspacePath);
-
-  const workspaceDeps = workspaceDependencies[name];
-  if (!workspaceDeps) {
-    error("Internal error: workspace dependencies not found", name);
-    process.exit(1);
-  }
-
+  const workspaceDeps = getWorkspaceDependencies(workspaceName);
   const missing = getMissingItems(workspaceDeps, buildInfoDependencies);
   const redundant = getRedundantItems(workspaceDeps, buildInfoDependencies);
 
   if (missing.length) {
-    warn(
-      `Detected missing dependencies in ${green(name)} package.json:`,
-      gray(missing.join(", "))
-    );
+    const command = `npm install -w ${workspaceName} ${missing
+      .map((name) => name + "@*")
+      .join(" ")}`;
 
-    log(
-      `${gray("Please run")}:
+    if (!commandsReported.has(command)) {
+      commandsReported.add(command);
+
+      warn(
+        `Detected missing dependencies in ${green(
+          workspaceName
+        )} package.json:`,
+        gray(missing.join(", "))
+      );
+
+      log(
+        `${gray("Please run")}:
     
-    ${blue(
-      `npm install -w ${name} ${missing.map((name) => name + "@*").join(" ")}`
-    )}`
-    );
+    ${blue(command)}`
+      );
+    }
   }
 
   if (showRedundant && redundant.length) {
-    warn(
-      `Detected redundant dependencies in ${green(name)} package.json:`,
-      gray(redundant.join(", "))
-    );
+    const command = `npm uninstall -w ${workspaceName} ${redundant
+      .map((name) => name + "@*")
+      .join(" ")}`;
 
-    log(
-      `${gray("Please run")}:
+    if (!commandsReported.has(command)) {
+      commandsReported.add(command);
+
+      warn(
+        `Detected redundant dependencies in ${green(
+          workspaceName
+        )} package.json:`,
+        gray(redundant.join(", "))
+      );
+
+      log(
+        `${gray("Please run")}:
     
-    ${blue(
-      `npm uninstall -w ${name} ${redundant
-        .map((name) => name + "@*")
-        .join(" ")}`
-    )}`
-    );
+    ${blue(command)}`
+      );
+    }
   }
 
   await mutateTSConfig(getTSConfigPath(workspacePath), (tsConfig) => {
@@ -150,9 +199,16 @@ async function processBuildInfoAdd(absolutePath: AbsoluteBuildInfoPath) {
       buildInfoDependencies
     );
     const tsConfigReferences = tsConfig?.references || [];
-    const referencesUnchanged = areEqual(references, tsConfigReferences);
+    const referencesUnchanged = areReferencesEqual(
+      references,
+      tsConfigReferences
+    );
 
     if (referencesUnchanged) return false;
+
+    debug("References changed!");
+    debug("Actual references:", tsConfigReferences);
+    debug("The tsconfig.tsbuildinfo references:", references);
 
     log(
       `Writing ${blue(
@@ -229,21 +285,6 @@ function relativeWorkspacePathToGlobPattern(
 function getTSConfigGlobPath(pathPattern: WorkspacePathPattern) {
   return (pathPattern + "/*") as WorkspacePathPattern;
 }
-
-function processBuildInfoChange(absolutePath: AbsoluteBuildInfoPath) {
-  const path = relativeBuildInfoPath(absolutePath);
-  debug("Detected build info change", path);
-  warn("Function not implemented: processBuildInfoChange", path);
-  // TODO:
-}
-
-function processBuildInfoUnlink(absolutePath: AbsoluteBuildInfoPath) {
-  const path = relativeBuildInfoPath(absolutePath);
-  debug("Detected build info unlink", path);
-  warn("Function not implemented: processBuildInfoUnlink", path);
-  // TODO:
-}
-
 function dependeciesToReferences(
   workspacePath: WorkspacePath,
   dependencies: WorkspaceName[]
@@ -398,13 +439,23 @@ async function readPackageJSON(path: PackageJSONPath) {
   return JSON.parse(content) as PackageJSON;
 }
 
-function getWorkspaceDependenciesFromPackageJSON(packageJSON: PackageJSON) {
-  return getWorkspaceDependencies(packageJSON.dependencies).concat(
-    getWorkspaceDependencies(packageJSON.devDependencies)
+function getWorkspaceDependencies(workspaceName: WorkspaceName) {
+  const workspaceDeps = workspaceDependencies[workspaceName];
+  if (!workspaceDeps) {
+    error("Internal error: workspace dependencies not found", workspaceName);
+    log(new Error().stack);
+    process.exit(1);
+  }
+  return workspaceDeps;
+}
+
+function extractWorkspaceDependenciesFromPackageJSON(packageJSON: PackageJSON) {
+  return extractWorkspaceDependencies(packageJSON.dependencies).concat(
+    extractWorkspaceDependencies(packageJSON.devDependencies)
   );
 }
 
-function getWorkspaceDependencies(
+function extractWorkspaceDependencies(
   dependencies: Record<WorkspaceName, string> | undefined
 ) {
   const names = Object.values(workspaceNames);
@@ -437,6 +488,14 @@ function buildWathInfoPath(workspace: WorkspacePath) {
 
 function buildInfoPathToWorkspacePath(buildInfoPath: BuildInfoPath) {
   return relative(root, resolve(dirname(buildInfoPath), "..")) as WorkspacePath;
+}
+
+function areReferencesEqual(a: TSConfigReference[], b: TSConfigReference[]) {
+  return areEqual(a.map(getReferencePath), b.map(getReferencePath));
+}
+
+function getReferencePath(reference: TSConfigReference) {
+  return reference.path;
 }
 
 function areEqual<Type>(a: Type[], b: Type[]) {
