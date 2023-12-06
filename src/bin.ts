@@ -1,5 +1,5 @@
-import { watch } from "chokidar";
-import { readFile, writeFile } from "fs/promises";
+import { FSWatcher, watch } from "chokidar";
+import { readFile, writeFile, stat } from "fs/promises";
 import { glob } from "glob";
 import { dirname, relative, resolve } from "path";
 import picocolors from "picocolors";
@@ -16,10 +16,13 @@ const root = process.cwd();
 const rootPackageJSONPath = resolve(root, "package.json") as PackageJSONPath;
 
 let watchedWorkspaces: WorkspacePath[] = [];
-const workspaceNames: Record<WorkspacePath, WorkspaceName> = {};
-const workspaceDependencies: Record<WorkspaceName, WorkspaceName[]> = {};
-const workspacesWatch = watchWorkspaces();
+let workspaceNames: Record<WorkspacePath, WorkspaceName> = {};
+let workspaceDependencies: Record<WorkspaceName, WorkspaceName[]> = {};
 
+const unlinkedBuildInfos = new Set<BuildInfoPath>();
+const commandsReported = new Set<string>();
+
+const workspacesWatch = watchWorkspaces();
 const buildInfoWatch = watchBuildInfos();
 
 watchPackageJSON();
@@ -94,8 +97,6 @@ function watchBuildInfos() {
   return buildInfoWatch;
 }
 
-const unlinkedBuildInfos = new Set<BuildInfoPath>();
-
 async function processBuildInfoAdd(absolutePath: AbsoluteBuildInfoPath) {
   return processBuildInfoUpdate(absolutePath, true);
 }
@@ -119,8 +120,6 @@ function processBuildInfoUnlink(absolutePath: AbsoluteBuildInfoPath) {
 
   unlinkedBuildInfos.add(buildInfoPath);
 }
-
-const commandsReported = new Set<string>();
 
 async function processBuildInfoUpdate(
   absolutePath: AbsoluteBuildInfoPath,
@@ -314,6 +313,12 @@ function watchBuildInfo(workspace: WorkspacePath) {
 }
 
 function watchPackageJSON() {
+  stat(rootPackageJSONPath).catch(() => {
+    warn(
+      "package.json not found, make sure you are in the root directory. The processing will begine once the file is created."
+    );
+  });
+
   const packageJSONWatch = watch(rootPackageJSONPath);
 
   packageJSONWatch.on("all", async (event, _path) => {
@@ -331,7 +336,7 @@ function watchPackageJSON() {
 }
 
 async function processPackageJSONAdd() {
-  debug("Detected package.json, initializing watcher");
+  debug("Detected package.json, initializing processing");
   const workspaces = (watchedWorkspaces = await readWorkspaces());
   debug("Found workspaces", workspaces);
   await initWorkspaceNames(workspaces);
@@ -345,9 +350,17 @@ async function processPackageJSONChange() {
 }
 
 async function processPackageJSONUnlink() {
-  warn("package.json has been deleted, pausing");
-  warn("Function not implemented: processPackageJSONUnlink");
-  // TODO:
+  warn("package.json has been deleted, pausing processing");
+
+  unwatch(workspacesWatch);
+  unwatch(buildInfoWatch);
+
+  commandsReported.clear();
+  unlinkedBuildInfos.clear();
+
+  workspaceDependencies = {};
+  workspaceNames = {};
+  watchedWorkspaces = [];
 }
 
 async function initWorkspaceNames(workspaces: WorkspacePath[]) {
@@ -661,6 +674,16 @@ async function withRetry<Type>(
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function unwatch(watcher: FSWatcher) {
+  const watched = watcher.getWatched();
+
+  const allPaths = Object.entries(watched).flatMap(([dir, files]) =>
+    files.map((file) => `${dir}/${file}`).concat(dir)
+  );
+
+  return watcher.unwatch(allPaths);
 }
 
 interface BuildInfo {
