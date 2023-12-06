@@ -1,9 +1,11 @@
-import type { OpaqueString } from "typeroo/string";
 import { watch } from "chokidar";
 import { readFile, writeFile } from "fs/promises";
 import { glob } from "glob";
 import { dirname, relative, resolve } from "path";
 import picocolors from "picocolors";
+import { format } from "prettier";
+import type { OpaqueString } from "typeroo/string";
+
 const { red, yellow, green, gray, blue } = picocolors;
 
 const verbose = !!process.argv.find((arg) => arg === "--verbose");
@@ -61,15 +63,15 @@ async function processWorkspaceAdd(absolutePath: AbsolutePackageJSONPath) {
 async function processWorkspaceChange(absolutePath: AbsolutePackageJSONPath) {
   const path = relativePackageJSONPath(absolutePath);
   debug("Detected workspace package.json change, TODO:", path);
-
-  throw new Error("Function not implemented.");
+  warn("Function not implemented: processWorkspaceUnlink", path);
+  // TODO:
 }
 
 async function processWorkspaceUnlink(absolutePath: AbsolutePackageJSONPath) {
   const path = relativePackageJSONPath(absolutePath);
   debug("Detected workspace package.json unlink, TODO:", path);
-
-  throw new Error("Function not implemented.");
+  warn("Function not implemented: processWorkspaceUnlink", path);
+  // TODO:
 }
 
 function watchBuildInfos() {
@@ -107,11 +109,8 @@ async function processBuildInfoAdd(absolutePath: AbsoluteBuildInfoPath) {
     process.exit(1);
   }
 
-  const missing = findMissingDependencies(workspaceDeps, buildInfoDependencies);
-  const redundant = findRedundantDependencies(
-    workspaceDeps,
-    buildInfoDependencies
-  );
+  const missing = getMissingItems(workspaceDeps, buildInfoDependencies);
+  const redundant = getRedundantItems(workspaceDeps, buildInfoDependencies);
 
   if (missing.length) {
     warn(
@@ -150,30 +149,99 @@ async function processBuildInfoAdd(absolutePath: AbsoluteBuildInfoPath) {
       workspacePath,
       buildInfoDependencies
     );
-    const referencesUnchanged = areArraysEqual(
-      references,
-      tsConfig?.references || []
-    );
+    const tsConfigReferences = tsConfig?.references || [];
+    const referencesUnchanged = areEqual(references, tsConfigReferences);
+
     if (referencesUnchanged) return false;
+
     log(
       `Writing ${blue(
         getWorkspaceName(workspacePath)
       )} tsconfig.json with updated references list`
     );
     debug("References:", references);
+
+    tsConfig.references = references;
+
+    tsConfig.compilerOptions = tsConfig.compilerOptions || {};
+    tsConfig.compilerOptions.paths = tsConfig.compilerOptions.paths || {};
+
+    const redundant = getRedundantItems(tsConfigReferences, references);
+    const missing = getMissingItems(tsConfigReferences, references);
+
+    for (const { path: relativeWorkspacePath } of redundant) {
+      const pathPattern = findTSConfigRedundantPathPattern(
+        tsConfig.compilerOptions.paths,
+        relativeWorkspacePath
+      );
+      if (pathPattern) {
+        delete tsConfig.compilerOptions.paths[pathPattern];
+        delete tsConfig.compilerOptions.paths[getTSConfigGlobPath(pathPattern)];
+      }
+    }
+
+    for (const { path: relativeWorkspacePath } of missing) {
+      const workspaceName = getWorkspaceName(
+        relativeWorkspacePathToWorkspacePath(
+          relativeWorkspacePath,
+          workspacePath
+        )
+      );
+      const pathPattern = workspaceNameToPathPattern(workspaceName);
+
+      tsConfig.compilerOptions.paths[pathPattern] = [
+        relativeWorkspacePathToPathPattern(relativeWorkspacePath),
+      ];
+      tsConfig.compilerOptions.paths[getTSConfigGlobPath(pathPattern)] = [
+        relativeWorkspacePathToGlobPattern(relativeWorkspacePath),
+      ];
+    }
   });
+}
+
+function workspaceNameToPathPattern(name: WorkspaceName) {
+  return name as unknown as WorkspacePathPattern;
+}
+
+function findTSConfigRedundantPathPattern(
+  tsConfigPaths: TSConfigPaths,
+  relativeWorkspacePath: RelativeWorkspacePath
+) {
+  return Object.entries(tsConfigPaths).find(([_, paths]) =>
+    paths.includes(
+      relativeWorkspacePath as unknown as RelativeWorkspacePathPattern
+    )
+  )?.[0] as WorkspacePathPattern | undefined;
+}
+
+function relativeWorkspacePathToPathPattern(
+  relativeWorkspacePath: RelativeWorkspacePath
+) {
+  return relativeWorkspacePath as unknown as RelativeWorkspacePathPattern;
+}
+
+function relativeWorkspacePathToGlobPattern(
+  relativeWorkspacePath: RelativeWorkspacePath
+) {
+  return (relativeWorkspacePath + "/*") as RelativeWorkspacePathPattern;
+}
+
+function getTSConfigGlobPath(pathPattern: WorkspacePathPattern) {
+  return (pathPattern + "/*") as WorkspacePathPattern;
 }
 
 function processBuildInfoChange(absolutePath: AbsoluteBuildInfoPath) {
   const path = relativeBuildInfoPath(absolutePath);
   debug("Detected build info change", path);
-  throw new Error("Function not implemented.");
+  warn("Function not implemented: processBuildInfoChange", path);
+  // TODO:
 }
 
 function processBuildInfoUnlink(absolutePath: AbsoluteBuildInfoPath) {
   const path = relativeBuildInfoPath(absolutePath);
   debug("Detected build info unlink", path);
-  throw new Error("Function not implemented.");
+  warn("Function not implemented: processBuildInfoUnlink", path);
+  // TODO:
 }
 
 function dependeciesToReferences(
@@ -222,11 +290,14 @@ async function processPackageJSONAdd() {
 
 async function processPackageJSONChange() {
   debug("Detected package.json change, updating watchlist");
-  await readPackageJSON(rootPackageJSONPath);
+  warn("Function not implemented: processPackageJSONChange");
+  // TODO:
 }
 
 async function processPackageJSONUnlink() {
   warn("package.json has been deleted, pausing");
+  warn("Function not implemented: processPackageJSONUnlink");
+  // TODO:
 }
 
 async function initWorkspaceNames(workspaces: WorkspacePath[]) {
@@ -300,6 +371,7 @@ function getWorkspaceName(workspacePath: WorkspacePath) {
   const name = workspaceNames[workspacePath];
   if (!name) {
     error("Internal error: workspace name not found", workspacePath);
+    log(new Error().stack);
     process.exit(1);
   }
   return name;
@@ -311,6 +383,7 @@ function getWorkspacePath(workspaceName: WorkspaceName) {
   )?.[0];
   if (!path) {
     error("Internal error: workspace path not found", workspaceName);
+    log(new Error().stack);
     process.exit(1);
   }
   return path as WorkspacePath;
@@ -366,22 +439,16 @@ function buildInfoPathToWorkspacePath(buildInfoPath: BuildInfoPath) {
   return relative(root, resolve(dirname(buildInfoPath), "..")) as WorkspacePath;
 }
 
-function areArraysEqual<Type extends any>(a: Type[], b: Type[]) {
+function areEqual<Type>(a: Type[], b: Type[]) {
   return a.length === b.length && a.every((item) => b.includes(item));
 }
 
-function findMissingDependencies(
-  actual: WorkspaceName[],
-  required: WorkspaceName[]
-) {
-  return required.filter((item) => !actual.includes(item));
+function getMissingItems<Type>(actual: Type[], next: Type[]) {
+  return next.filter((item) => !actual.includes(item));
 }
 
-function findRedundantDependencies(
-  actual: WorkspaceName[],
-  required: WorkspaceName[]
-) {
-  return actual.filter((item) => !required.includes(item));
+function getRedundantItems<Type>(actual: Type[], next: Type[]) {
+  return actual.filter((item) => !next.includes(item));
 }
 
 async function readTSConfig(path: TSConfigPath) {
@@ -390,14 +457,14 @@ async function readTSConfig(path: TSConfigPath) {
 }
 
 async function mutateTSConfig(
-  path: TSConfigPath,
+  tsConfigPath: TSConfigPath,
   mutator: (tsConfig: TSConfig) => boolean | void
 ) {
-  const tsConfig = await readTSConfig(path);
-  const skipWrite = !mutator(tsConfig);
+  const tsConfig = await readTSConfig(tsConfigPath);
+  const skipWrite = mutator(tsConfig) === false;
   if (skipWrite) return;
-  const content = JSON.stringify(tsConfig, null, 2);
-  await writeFile(path, content);
+  const content = await format(JSON.stringify(tsConfig), { parser: "json" });
+  await writeFile(tsConfigPath, content);
 }
 
 function getTSConfigPath(workspace: WorkspacePath) {
@@ -409,6 +476,13 @@ function getRelativeWorkspacePath(
   workspace?: WorkspacePath
 ) {
   return relative(workspace || root, dependency) as RelativeWorkspacePath;
+}
+
+function relativeWorkspacePathToWorkspacePath(
+  relativePath: RelativeWorkspacePath,
+  workspacePath: WorkspacePath
+) {
+  return relative(root, resolve(workspacePath, relativePath)) as WorkspacePath;
 }
 
 function debug(...message: any[]) {
@@ -441,9 +515,17 @@ interface PackageJSON {
 }
 
 interface TSConfig {
+  compilerOptions?: {
+    paths?: TSConfigPaths;
+  };
   files?: string[];
   references?: TSConfigReference[];
 }
+
+type TSConfigPaths = Record<
+  WorkspacePathPattern,
+  [RelativeWorkspacePathPattern]
+>;
 
 interface TSConfigReference {
   path: RelativeWorkspacePath;
@@ -460,8 +542,16 @@ declare const packageJSONPathBrand: unique symbol;
 type WorkspacePath = OpaqueString<typeof workspacePathBrand>;
 declare const workspacePathBrand: unique symbol;
 
+type WorkspacePathPattern = OpaqueString<typeof workspacePathPatternBrand>;
+declare const workspacePathPatternBrand: unique symbol;
+
 type RelativeWorkspacePath = OpaqueString<typeof relativeWorkspacePathBrand>;
 declare const relativeWorkspacePathBrand: unique symbol;
+
+type RelativeWorkspacePathPattern = OpaqueString<
+  typeof relativeWorkspacePathPatternBrand
+>;
+declare const relativeWorkspacePathPatternBrand: unique symbol;
 
 type WorkspaceName = OpaqueString<typeof workspaceNameBrand>;
 declare const workspaceNameBrand: unique symbol;
