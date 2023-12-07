@@ -145,8 +145,9 @@ async function processRootPackageAdd() {
 }
 
 async function processRootPackageCreate(initialPackage?: Package) {
+  debug("Detected package.json create, initializing processing");
+
   const rootPackage = initialPackage || (await readPackage(rootPackagePath));
-  debug("Detected package.json, initializing processing");
 
   const workspaces = await workspacesFromPackage(rootPackage);
   debug("Found workspaces", workspaces);
@@ -160,8 +161,45 @@ async function processRootPackageCreate(initialPackage?: Package) {
 
 async function processRootPackageChange() {
   debug("Detected package.json change, updating watchlist");
-  warn("Function not implemented: processPackageChange");
-  // TODO:
+
+  const rootPackage = await readPackage(rootPackagePath);
+
+  const workspaces = await workspacesFromPackage(rootPackage);
+  debug("Found workspaces", workspaces);
+
+  const watchedWorkspaces = getWatchedWorkspacePaths();
+
+  if (areEqual(workspaces, watchedWorkspaces)) {
+    debug("Workspaces list unchanged, skipping");
+    return;
+  }
+
+  const missingWorkspaces = getMissingItems(watchedWorkspaces, workspaces);
+  const redundantWorkspaces = getRedundantItems(watchedWorkspaces, workspaces);
+  log(
+    `Workspaces list updated, ${
+      missingWorkspaces.length
+        ? `added: ${missingWorkspaces.map(green).join(", ")}` +
+          (redundantWorkspaces.length ? "; " : "")
+        : ""
+    }${
+      redundantWorkspaces.length
+        ? `removed: ${redundantWorkspaces.map(gray).join(", ")}`
+        : ""
+    }; processing`
+  );
+
+  // Update the workspace names before updating the watchlist
+  await initWorkspaceNames(workspaces);
+
+  // Remove redundant workspaces
+  redundantWorkspaces.forEach((workspacePath) => {
+    workspacePackagesWatchlist.delete(getWorkspacePackagePath(workspacePath));
+    buildInfoWatchlist.delete(getBuildInfoPath(workspacePath));
+  });
+
+  // Add missing workspaces
+  missingWorkspaces.forEach(watchWorkspacePackage);
 }
 
 async function processRootPackageDelete() {
@@ -331,7 +369,7 @@ async function processBuildInfoWrite(
     debug("The tsconfig.tsbuildinfo references:", references);
 
     log(
-      `Writing ${blue(
+      `Writing ${green(
         getWorkspaceName(workspacePath)
       )} tsconfig.json with updated references list`
     );
@@ -452,20 +490,23 @@ function getReferencePath(
 /// Workspaces
 
 async function initWorkspaceNames(workspacePaths: WorkspacePath[]) {
-  return Promise.all(
-    workspacePaths.map(async (workspace) => {
+  const names = await Promise.all(
+    workspacePaths.map(async (workspacePath) => {
       try {
-        const pkg = await readPackage(getWorkspacePackagePath(workspace));
+        const pkg = await readPackage(getWorkspacePackagePath(workspacePath));
         const name = pkg.name as WorkspaceName;
-        workspaceNames.set(workspace, name);
+        return [workspacePath, name] as const;
       } catch (_error) {
         warn(
-          `Workspace package.json not found, ignoring ${green(workspace)}`,
-          workspace
+          `Workspace package.json not found, ignoring ${green(workspacePath)}`,
+          workspacePath
         );
       }
     })
   );
+
+  workspaceNames.clear();
+  names.forEach((name) => name && workspaceNames.set(...name));
 }
 
 async function workspacesFromPackage(pkg: Package): Promise<WorkspacePath[]> {
