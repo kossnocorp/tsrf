@@ -194,8 +194,12 @@ async function processRootPackageChange() {
 
   // Remove redundant workspaces
   redundantWorkspaces.forEach((workspacePath) => {
+    // Update the watchlists
     workspacePackagesWatchlist.delete(getWorkspacePackagePath(workspacePath));
     buildInfoWatchlist.delete(getBuildInfoPath(workspacePath));
+    // Clean up the workspace links
+    workspaceDependencies.delete(getWorkspaceName(workspacePath));
+    workspaceNames.delete(workspacePath);
   });
 
   // Add missing workspaces
@@ -231,7 +235,7 @@ async function processWorkspacePackageCreate(packagePath: PackagePath) {
   const dependencies = getPackageDependencies(pkg);
   debug("Found workspace dependencies", workspaceName, dependencies);
 
-  // Assign workspace data
+  // Assign the workspace links
   workspaceNames.set(workspacePath, workspaceName);
   workspaceDependencies.set(workspaceName, dependencies);
 
