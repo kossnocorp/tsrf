@@ -9,27 +9,35 @@ import watcher from "@parcel/watcher";
 
 const { red, yellow, green, gray, blue } = picocolors;
 
+/// CLI
+
 const verbose = !!process.argv.find((arg) => arg === "--verbose");
 const showRedundant = !!process.argv.find((arg) => arg === "--redundant");
 
+/// Constants
+
 const root = process.cwd();
-const rootPackageJSONPath = "package.json" as PackageJSONPath;
+const rootPackagePath = "package.json" as PackagePath;
 
-let watchedWorkspaces: WorkspacePath[] = [];
-let workspaceNames: Record<WorkspacePath, WorkspaceName> = {};
-let workspaceDependencies: Record<WorkspaceName, WorkspaceName[]> = {};
+/// State
 
+// Links
+const workspaceNames = new Map<WorkspacePath, WorkspaceName>();
+const workspaceDependencies = new Map<WorkspaceName, WorkspaceName[]>();
+
+// DX state
 const unlinkedBuildInfos = new Set<BuildInfoPath>();
 const commandsReported = new Set<string>();
 
-startWatcher().then(() => processPackageJSONAdd());
+// Watchlists
+const workspacePackagesWatchlist = new Set<PackagePath>();
+const buildInfoWatchlist = new Set<BuildInfoPath>();
+
+/// Main
+
+startWatcher().then(() => processRootPackageAdd());
 
 /// Watcher
-
-//// Globals
-
-const workspacePackageJSONWatchlist = new Set<PackageJSONPath>();
-const workspaceBuildInfoWatchlist = new Set<BuildInfoPath>();
 
 //// Events processing
 
@@ -42,79 +50,82 @@ function startWatcher() {
 
     events.forEach((event) => {
       const path = relative(root, event.path);
-      console.log({ event, path });
+
       switch (true) {
-        case path === rootPackageJSONPath:
-          return processPackageJSONWatchEvent(event);
+        case path === rootPackagePath:
+          return processRootPackageWatchEvent(event);
 
-        case workspacePackageJSONWatchlist.has(path as PackageJSONPath):
-          return processWorkspacesWatchEvent(event, path as PackageJSONPath);
+        case workspacePackagesWatchlist.has(path as PackagePath):
+          return processWorkspacePackageWatchEvent(event, path as PackagePath);
 
-        case workspaceBuildInfoWatchlist.has(path as BuildInfoPath):
+        case buildInfoWatchlist.has(path as BuildInfoPath):
           return processBuildInfoWatchEvent(event, path as BuildInfoPath);
       }
     });
   });
 }
 
-function processPackageJSONWatchEvent(event: watcher.Event) {
+function processRootPackageWatchEvent(event: watcher.Event) {
   switch (event.type) {
     case "create":
-      return processPackageJSONCreate();
+      return processRootPackageCreate();
 
     case "update":
-      return processPackageJSONChange();
+      return processRootPackageChange();
 
     case "delete":
-      return processPackageJSONDelete();
+      return processRootPackageDelete();
   }
 }
 
-function processWorkspacesWatchEvent(
+function processWorkspacePackageWatchEvent(
   event: watcher.Event,
-  path: PackageJSONPath
+  packagePath: PackagePath
 ) {
   switch (event.type) {
     case "create":
-      return processWorkspaceCreate(path);
+      return processWorkspacePackageCreate(packagePath);
 
     case "update":
-      return processWorkspaceUpdate(path);
+      return processWorkspacePackageUpdate(packagePath);
 
     case "delete":
-      return processWorkspaceDelete(path);
+      return processWorkspacePackageDelete(packagePath);
   }
 }
 
-function processBuildInfoWatchEvent(event: watcher.Event, path: BuildInfoPath) {
+function processBuildInfoWatchEvent(
+  event: watcher.Event,
+  buildInfoPath: BuildInfoPath
+) {
   switch (event.type) {
     case "create":
-      return processBuildInfoCreate(path);
+      return processBuildInfoCreate(buildInfoPath);
 
     case "update":
-      return processBuildInfoUpdate(path);
+      return processBuildInfoUpdate(buildInfoPath);
 
     case "delete":
-      return processBuildInfoDelete(path);
+      return processBuildInfoDelete(buildInfoPath);
   }
 }
 
 //// Watchlists management
 
-function watchWorkspace(workspacePath: WorkspacePath) {
+function watchWorkspacePackage(workspacePath: WorkspacePath) {
   debug("Watching workspace", workspacePath);
-  const packageJSONPath = workspacePackageJSONPath(workspacePath);
-  workspacePackageJSONWatchlist.add(packageJSONPath);
+  const packagePath = getWorkspacePackagePath(workspacePath);
+  workspacePackagesWatchlist.add(packagePath);
 
-  return stat(packageJSONPath)
+  return stat(packagePath)
     .catch(() => {})
-    .then((stats) => stats && processWorkspaceCreate(packageJSONPath));
+    .then((stats) => stats && processWorkspacePackageCreate(packagePath));
 }
 
-function watchBuildInfo(workspace: WorkspacePath) {
-  const buildInfoPath = getBuildInfoPath(workspace);
-  debug("Watching build info", workspace, buildInfoPath);
-  workspaceBuildInfoWatchlist.add(buildInfoPath);
+function watchBuildInfo(workspacePath: WorkspacePath) {
+  const buildInfoPath = getBuildInfoPath(workspacePath);
+  debug("Watching build info", workspacePath, buildInfoPath);
+  buildInfoWatchlist.add(buildInfoPath);
   return stat(buildInfoPath)
     .catch(() => {})
     .then((stats) => stats && processBuildInfoCreate(buildInfoPath));
@@ -122,67 +133,89 @@ function watchBuildInfo(workspace: WorkspacePath) {
 
 //// Root package.json events processing
 
-async function processPackageJSONAdd() {
-  const rootPackageJSON = await readPackageJSON(rootPackageJSONPath).catch(() =>
+async function processRootPackageAdd() {
+  const rootPackage = await readPackage(rootPackagePath).catch(() =>
     warn(
       "package.json not found, make sure you are in the root directory. The processing will begine once the file is created."
     )
   );
-  if (!rootPackageJSON) return;
+  if (!rootPackage) return;
 
-  processPackageJSONCreate(rootPackageJSON);
+  processRootPackageCreate(rootPackage);
 }
 
-async function processPackageJSONCreate(initialPackageJSON?: PackageJSON) {
-  const rootPackageJSON =
-    initialPackageJSON || (await readPackageJSON(rootPackageJSONPath));
+async function processRootPackageCreate(initialPackage?: Package) {
+  const rootPackage = initialPackage || (await readPackage(rootPackagePath));
   debug("Detected package.json, initializing processing");
 
-  const workspaces = (watchedWorkspaces = await getWorkspaces(rootPackageJSON));
+  const workspaces = await workspacesFromPackage(rootPackage);
   debug("Found workspaces", workspaces);
 
   // First we have to read names, so when we process workspace create event,
   // we can get the dependency names.
   await initWorkspaceNames(workspaces);
 
-  return Promise.all(workspaces.map(watchWorkspace));
+  return Promise.all(workspaces.map(watchWorkspacePackage));
+}
+
+async function processRootPackageChange() {
+  debug("Detected package.json change, updating watchlist");
+  warn("Function not implemented: processPackageChange");
+  // TODO:
+}
+
+async function processRootPackageDelete() {
+  warn("package.json has been deleted, pausing processing");
+
+  // Clean up watchlists
+  buildInfoWatchlist.clear();
+  workspacePackagesWatchlist.clear();
+
+  // Clean up DX state
+  commandsReported.clear();
+  unlinkedBuildInfos.clear();
+
+  // Clean up links
+  workspaceDependencies.clear();
+  workspaceNames.clear();
 }
 
 //// Workspace package.json events processing
 
-async function processWorkspaceCreate(path: PackageJSONPath) {
-  debug("Detected workspace package.json", path);
+async function processWorkspacePackageCreate(packagePath: PackagePath) {
+  debug("Detected workspace package.json", packagePath);
 
-  const workspacePath = packageJSONPathToWorkspacePath(path);
-  const name = getWorkspaceName(workspacePath);
+  const workspacePath = packagePathToWorkspacePath(packagePath);
+  const workspaceName = getWorkspaceName(workspacePath);
+  debug("Watching workspace", workspaceName, `(${dirname(packagePath)})`);
 
-  debug("Watching workspace", name, `(${dirname(path)})`);
+  const pkg = await readPackage(packagePath);
+  const dependencies = getPackageDependencies(pkg);
+  debug("Found workspace dependencies", workspaceName, dependencies);
 
-  const packageJSON = await readPackageJSON(path);
-  const dependencies = extractWorkspaceDependenciesFromPackageJSON(packageJSON);
-
-  debug("Found workspace dependencies", name, dependencies);
-  workspaceDependencies[name] = dependencies;
+  // Assign workspace data
+  workspaceNames.set(workspacePath, workspaceName);
+  workspaceDependencies.set(workspaceName, dependencies);
 
   return watchBuildInfo(workspacePath);
 }
 
-async function processWorkspaceUpdate(path: PackageJSONPath) {
-  debug("Detected workspace package.json change, TODO:", path);
-  warn("Function not implemented: processWorkspaceUnlink", path);
+async function processWorkspacePackageUpdate(packagePath: PackagePath) {
+  debug("Detected workspace package.json change, TODO:", packagePath);
+  warn("Function not implemented: processWorkspaceUnlink", packagePath);
   // TODO:
 }
 
-async function processWorkspaceDelete(path: PackageJSONPath) {
-  debug("Detected workspace package.json unlink, TODO:", path);
-  warn("Function not implemented: processWorkspaceUnlink", path);
+async function processWorkspacePackageDelete(packagePath: PackagePath) {
+  debug("Detected workspace package.json unlink, TODO:", packagePath);
+  warn("Function not implemented: processWorkspaceUnlink", packagePath);
   // TODO:
 }
 
 //// Build info events processing
 
-async function processBuildInfoCreate(path: BuildInfoPath) {
-  return processBuildInfoWrite(path, true);
+async function processBuildInfoCreate(buildInfoPath: BuildInfoPath) {
+  return processBuildInfoWrite(buildInfoPath, true);
 }
 
 async function processBuildInfoUpdate(path: BuildInfoPath) {
@@ -222,20 +255,20 @@ async function processBuildInfoWrite(
     );
   }
 
-  let buildInfoDependencies: WorkspaceName[];
+  let buildInfoDeps: WorkspaceName[];
   try {
-    buildInfoDependencies = await getBuildInfoDependencies(buildInfoPath);
+    buildInfoDeps = await getBuildInfoDependencies(buildInfoPath);
   } catch (err) {
     error("Failed to get build info dependencies", buildInfoPath);
     log(err);
     return;
   }
 
-  debug("Found build info dependencies", buildInfoPath, buildInfoDependencies);
+  debug("Found build info dependencies", buildInfoPath, buildInfoDeps);
 
   const workspaceDeps = getWorkspaceDependencies(workspaceName);
-  const missing = getMissingItems(workspaceDeps, buildInfoDependencies);
-  const redundant = getRedundantItems(workspaceDeps, buildInfoDependencies);
+  const missing = getMissingItems(workspaceDeps, buildInfoDeps);
+  const redundant = getRedundantItems(workspaceDeps, buildInfoDeps);
 
   if (missing.length) {
     const command = `npm install -w ${workspaceName} ${missing
@@ -284,10 +317,7 @@ async function processBuildInfoWrite(
   }
 
   await mutateTSConfig(getTSConfigPath(workspacePath), (tsConfig) => {
-    const references = dependeciesToReferences(
-      workspacePath,
-      buildInfoDependencies
-    );
+    const references = referencesFromWorkspaces(workspacePath, buildInfoDeps);
     const tsConfigReferences = tsConfig?.references || [];
     const referencesUnchanged = areReferencesEqual(
       references,
@@ -312,113 +342,122 @@ async function processBuildInfoWrite(
     tsConfig.compilerOptions = tsConfig.compilerOptions || {};
     tsConfig.compilerOptions.paths = tsConfig.compilerOptions.paths || {};
 
-    const redundant = getRedundantItems(tsConfigReferences, references);
-    const missing = getMissingItems(tsConfigReferences, references);
+    const redundantRefs = getRedundantItems(tsConfigReferences, references);
+    const missingRefs = getMissingItems(tsConfigReferences, references);
 
-    for (const { path: relativeWorkspacePath } of redundant) {
-      const pathPattern = findTSConfigRedundantPathPattern(
+    for (const { path: referencePath } of redundantRefs) {
+      const pathAlias = findRedundantAliases(
         tsConfig.compilerOptions.paths,
-        relativeWorkspacePath
+        referencePath
       );
-      if (pathPattern) {
-        delete tsConfig.compilerOptions.paths[pathPattern];
-        delete tsConfig.compilerOptions.paths[getTSConfigGlobPath(pathPattern)];
+      if (pathAlias) {
+        delete tsConfig.compilerOptions.paths[pathAlias];
+        delete tsConfig.compilerOptions.paths[pathAliasToGlob(pathAlias)];
       }
     }
 
-    for (const { path: relativeWorkspacePath } of missing) {
+    for (const { path: referencePath } of missingRefs) {
       const workspaceName = getWorkspaceName(
-        relativeWorkspacePathToWorkspacePath(
-          relativeWorkspacePath,
-          workspacePath
-        )
+        workspacePathFromReferencePath(referencePath, workspacePath)
       );
-      const pathPattern = workspaceNameToPathPattern(workspaceName);
+      const pathAlias = aliasFromWorkspaceName(workspaceName);
 
-      tsConfig.compilerOptions.paths[pathPattern] = [
-        relativeWorkspacePathToPathPattern(relativeWorkspacePath),
+      tsConfig.compilerOptions.paths[pathAlias] = [
+        referencePathToAliasResolve(referencePath),
       ];
-      tsConfig.compilerOptions.paths[getTSConfigGlobPath(pathPattern)] = [
-        relativeWorkspacePathToGlobPattern(relativeWorkspacePath),
+      tsConfig.compilerOptions.paths[pathAliasToGlob(pathAlias)] = [
+        referencePathToAliashResolveGlob(referencePath),
       ];
     }
   });
 }
 
-////
+/// Package
 
-function workspaceNameToPathPattern(name: WorkspaceName) {
-  return name as unknown as WorkspacePathPattern;
+async function readPackage(packagePath: PackagePath) {
+  const content = await readFile(packagePath, "utf-8");
+  return JSON.parse(content) as Package;
 }
 
-function findTSConfigRedundantPathPattern(
-  tsConfigPaths: TSConfigPaths,
-  relativeWorkspacePath: RelativeWorkspacePath
+function getPackageDependencies(pkg: Package) {
+  return packageDependenciesToWorkspaceNames(pkg.dependencies).concat(
+    packageDependenciesToWorkspaceNames(pkg.devDependencies)
+  );
+}
+
+function packageDependenciesToWorkspaceNames(
+  dependencies: Record<WorkspaceName, string> | undefined
 ) {
-  return Object.entries(tsConfigPaths).find(([_, paths]) =>
-    paths.includes(
-      relativeWorkspacePath as unknown as RelativeWorkspacePathPattern
-    )
-  )?.[0] as WorkspacePathPattern | undefined;
+  const names = Array.from(workspaceNames.values());
+  const dependenciesNames = Object.keys(dependencies || {}) as WorkspaceName[];
+  return dependenciesNames.filter((name) => names.includes(name));
 }
 
-function relativeWorkspacePathToPathPattern(
-  relativeWorkspacePath: RelativeWorkspacePath
+function getWorkspacePackagePath(workspace: WorkspacePath) {
+  return relative(root, resolve(workspace, "package.json")) as PackagePath;
+}
+
+function packagePathToWorkspacePath(packagePath: PackagePath) {
+  return dirname(packagePath) as WorkspacePath;
+}
+
+/// TSConfig
+
+function aliasFromWorkspaceName(workspaceName: WorkspaceName) {
+  return workspaceName as unknown as TSConfigAlias;
+}
+
+function findRedundantAliases(
+  aliases: TSConfigAliases,
+  referencePath: TSConfigReferencePath
 ) {
-  return relativeWorkspacePath as unknown as RelativeWorkspacePathPattern;
+  return Object.entries(aliases).find(([_, paths]) =>
+    paths.includes(referencePath as unknown as TSConfigAliasResolve)
+  )?.[0] as TSConfigAlias | undefined;
 }
 
-function relativeWorkspacePathToGlobPattern(
-  relativeWorkspacePath: RelativeWorkspacePath
+function referencePathToAliasResolve(referencePath: TSConfigReferencePath) {
+  return referencePath as unknown as TSConfigAliasResolve;
+}
+
+function referencePathToAliashResolveGlob(
+  referencePath: TSConfigReferencePath
 ) {
-  return (relativeWorkspacePath + "/*") as RelativeWorkspacePathPattern;
+  return (referencePath + "/*") as TSConfigAliasResolve;
 }
 
-function getTSConfigGlobPath(pathPattern: WorkspacePathPattern) {
-  return (pathPattern + "/*") as WorkspacePathPattern;
+function pathAliasToGlob(pathAlias: TSConfigAlias) {
+  return (pathAlias + "/*") as TSConfigAlias;
 }
 
-function dependeciesToReferences(
+function referencesFromWorkspaces(
   workspacePath: WorkspacePath,
   dependencies: WorkspaceName[]
 ): TSConfigReference[] {
   return dependencies.map((dependencyName) => ({
-    path: getRelativeWorkspacePath(
-      getWorkspacePath(dependencyName),
-      workspacePath
-    ),
+    path: getReferencePath(getWorkspacePath(dependencyName), workspacePath),
   }));
 }
 
-async function processPackageJSONChange() {
-  debug("Detected package.json change, updating watchlist");
-  warn("Function not implemented: processPackageJSONChange");
-  // TODO:
+function getReferencePath(
+  dependencyPath: WorkspacePath,
+  workspacePath?: WorkspacePath
+) {
+  return relative(
+    workspacePath || root,
+    dependencyPath
+  ) as TSConfigReferencePath;
 }
 
-async function processPackageJSONDelete() {
-  warn("package.json has been deleted, pausing processing");
+/// Workspaces
 
-  workspaceBuildInfoWatchlist.clear();
-  workspacePackageJSONWatchlist.clear();
-
-  commandsReported.clear();
-  unlinkedBuildInfos.clear();
-
-  workspaceDependencies = {};
-  workspaceNames = {};
-  watchedWorkspaces = [];
-}
-
-async function initWorkspaceNames(workspaces: WorkspacePath[]) {
+async function initWorkspaceNames(workspacePaths: WorkspacePath[]) {
   return Promise.all(
-    workspaces.map(async (workspace) => {
+    workspacePaths.map(async (workspace) => {
       try {
-        const packageJSON = await readPackageJSON(
-          workspacePackageJSONPath(workspace)
-        );
-        const name = packageJSON.name as WorkspaceName;
-        workspaceNames[workspace] = name;
+        const pkg = await readPackage(getWorkspacePackagePath(workspace));
+        const name = pkg.name as WorkspaceName;
+        workspaceNames.set(workspace, name);
       } catch (_error) {
         warn(
           `Workspace package.json not found, ignoring ${green(workspace)}`,
@@ -429,11 +468,89 @@ async function initWorkspaceNames(workspaces: WorkspacePath[]) {
   );
 }
 
-async function getWorkspaces(
-  packageJSON: PackageJSON
-): Promise<WorkspacePath[]> {
-  return (await glob(packageJSON.workspaces || [])) as WorkspacePath[];
+async function workspacesFromPackage(pkg: Package): Promise<WorkspacePath[]> {
+  return (await glob(pkg.workspaces || [])) as WorkspacePath[];
 }
+
+function workspacePathFromReferencePath(
+  referencePath: TSConfigReferencePath,
+  workspacePath: WorkspacePath
+) {
+  return relative(root, resolve(workspacePath, referencePath)) as WorkspacePath;
+}
+
+function getWorkspaceName(workspacePath: WorkspacePath) {
+  const name = workspaceNames.get(workspacePath);
+  if (!name) {
+    error("Internal error: workspace name not found", workspacePath);
+    log(new Error().stack);
+    process.exit(1);
+  }
+  return name;
+}
+
+function getWorkspacePath(workspaceName: WorkspaceName) {
+  const path = Array.from(workspaceNames).find(
+    ([, name]) => name === workspaceName
+  )?.[0];
+  if (!path) {
+    error("Internal error: workspace path not found", workspaceName);
+    log(new Error().stack);
+    process.exit(1);
+  }
+  return path as WorkspacePath;
+}
+
+function isFileBelongsToWorkspace(
+  filePath: WorkspaceFilePath,
+  workspacePath: WorkspacePath
+) {
+  return filePath.startsWith(workspacePath);
+}
+
+function getWorkspaceDependencies(workspaceName: WorkspaceName) {
+  const deps = workspaceDependencies.get(workspaceName);
+  if (!deps) {
+    error("Internal error: workspace dependencies not found", workspaceName);
+    log(new Error().stack);
+    process.exit(1);
+  }
+  return deps;
+}
+
+function getWatchedWorkspacePaths() {
+  return [...workspacePackagesWatchlist].map(packagePathToWorkspacePath);
+}
+
+/// Build info
+
+async function readBuildInfo(buildInfoPath: BuildInfoPath) {
+  const content = await readFile(buildInfoPath, "utf-8");
+  return JSON.parse(content) as BuildInfo;
+}
+
+function buildInfoFileToWorkspaceFile(
+  buildInfoPath: BuildInfoPath,
+  fileName: BuildInfoFileName
+) {
+  return relative(
+    root,
+    resolve(dirname(buildInfoPath), fileName)
+  ) as WorkspaceFilePath;
+}
+
+function getBuildInfoPath(workspacePath: WorkspacePath) {
+  return relative(
+    root,
+    resolve(workspacePath, ".ts/tsconfig.tsbuildinfo")
+  ) as BuildInfoPath;
+}
+
+function buildInfoPathToWorkspacePath(buildInfoPath: BuildInfoPath) {
+  return relative(root, resolve(dirname(buildInfoPath), "..")) as WorkspacePath;
+}
+
+/// Build info parsing
 
 async function getBuildInfoDependencies(
   buildInfoPath: BuildInfoPath
@@ -447,9 +564,9 @@ async function getBuildInfoDependencies(
   const allFileNames = new Set<BuildInfoFileName>();
 
   for (const index of indices) {
-    const listIds = getListIds(index, buildInfo);
-    const listFileIds = getListsFileIds(listIds, buildInfo);
-    const fileNames = getFileNames(listFileIds, buildInfo);
+    const listIds = getBuildInfoListIds(index, buildInfo);
+    const listFileIds = getBuildInfoListsFileIds(listIds, buildInfo);
+    const fileNames = getBuildInfoFileNames(listFileIds, buildInfo);
     fileNames.forEach((fileName) => allFileNames.add(fileName));
   }
 
@@ -457,8 +574,8 @@ async function getBuildInfoDependencies(
 
   allFileNames.forEach((buildInfoFile) => {
     const file = buildInfoFileToWorkspaceFile(buildInfoPath, buildInfoFile);
-    const workspacePath = watchedWorkspaces.find((workspace) =>
-      belongsToWorkspace(file, workspace)
+    const workspacePath = getWatchedWorkspacePaths().find((workspace) =>
+      isFileBelongsToWorkspace(file, workspace)
     );
     if (!workspacePath) return;
 
@@ -482,7 +599,7 @@ function getLocalBuildInfoFileIndices(buildInfo: BuildInfo) {
   return indices;
 }
 
-function getListIds(
+function getBuildInfoListIds(
   fileIndex: BuildInfoFileIndex,
   buildInfo: BuildInfo
 ): BuildInfoListId[] {
@@ -494,7 +611,7 @@ function getListIds(
   );
 }
 
-function getListsFileIds(
+function getBuildInfoListsFileIds(
   listIds: BuildInfoListId[],
   buildInfo: BuildInfo
 ): BuildInfoFileId[] {
@@ -507,7 +624,7 @@ function getListsFileIds(
   return [...fileIds];
 }
 
-function getFileNames(
+function getBuildInfoFileNames(
   fileIds: BuildInfoFileId[],
   buildInfo: BuildInfo
 ): BuildInfoFileName[] {
@@ -530,126 +647,19 @@ function buildInfoFileIdToIndex(id: BuildInfoFileId) {
   return (id - 1) as BuildInfoFileIndex;
 }
 
-async function readBuildInfo(path: BuildInfoPath) {
-  const content = await readFile(path, "utf-8");
-  return JSON.parse(content) as BuildInfo;
-}
-
-function buildInfoFileToWorkspaceFile(
-  buildInfoPath: BuildInfoPath,
-  file: BuildInfoFileName
-) {
-  return relative(
-    root,
-    resolve(dirname(buildInfoPath), file)
-  ) as WorkspaceFilePath;
-}
-
-function getWorkspaceName(workspacePath: WorkspacePath) {
-  const name = workspaceNames[workspacePath];
-  if (!name) {
-    error("Internal error: workspace name not found", workspacePath);
-    log(new Error().stack);
-    process.exit(1);
-  }
-  return name;
-}
-
-function getWorkspacePath(workspaceName: WorkspaceName) {
-  const path = Object.entries(workspaceNames).find(
-    ([, name]) => name === workspaceName
-  )?.[0];
-  if (!path) {
-    error("Internal error: workspace path not found", workspaceName);
-    log(new Error().stack);
-    process.exit(1);
-  }
-  return path as WorkspacePath;
-}
-
-function belongsToWorkspace(file: WorkspaceFilePath, workspace: WorkspacePath) {
-  return file.startsWith(workspace);
-}
-
-async function readPackageJSON(path: PackageJSONPath) {
-  const content = await readFile(path, "utf-8");
-  return JSON.parse(content) as PackageJSON;
-}
-
-function getWorkspaceDependencies(workspaceName: WorkspaceName) {
-  const workspaceDeps = workspaceDependencies[workspaceName];
-  if (!workspaceDeps) {
-    error("Internal error: workspace dependencies not found", workspaceName);
-    log(new Error().stack);
-    process.exit(1);
-  }
-  return workspaceDeps;
-}
-
-function extractWorkspaceDependenciesFromPackageJSON(packageJSON: PackageJSON) {
-  return extractWorkspaceDependencies(packageJSON.dependencies).concat(
-    extractWorkspaceDependencies(packageJSON.devDependencies)
-  );
-}
-
-function extractWorkspaceDependencies(
-  dependencies: Record<WorkspaceName, string> | undefined
-) {
-  const names = Object.values(workspaceNames);
-  const dependenciesNames = Object.keys(dependencies || {}) as WorkspaceName[];
-  return dependenciesNames.filter((name) => names.includes(name));
-}
-
-function workspacePackageJSONPath(workspace: WorkspacePath) {
-  return relative(root, resolve(workspace, "package.json")) as PackageJSONPath;
-}
-
-function packageJSONPathToWorkspacePath(packageJSONPath: PackageJSONPath) {
-  return dirname(packageJSONPath) as WorkspacePath;
-}
-
-function relativePackageJSONPath(packageJSONPath: AbsolutePackageJSONPath) {
-  return relative(root, packageJSONPath) as PackageJSONPath;
-}
-
-function relativeBuildInfoPath(buildInfoPath: AbsoluteBuildInfoPath) {
-  return relative(root, buildInfoPath) as BuildInfoPath;
-}
-
-function getBuildInfoPath(workspace: WorkspacePath) {
-  return relative(
-    root,
-    resolve(workspace, ".ts/tsconfig.tsbuildinfo")
-  ) as BuildInfoPath;
-}
-
-function buildInfoPathToWorkspacePath(buildInfoPath: BuildInfoPath) {
-  return relative(root, resolve(dirname(buildInfoPath), "..")) as WorkspacePath;
-}
-
-function areReferencesEqual(a: TSConfigReference[], b: TSConfigReference[]) {
-  return areEqual(a.map(getReferencePath), b.map(getReferencePath));
-}
-
-function getReferencePath(reference: TSConfigReference) {
-  return reference.path;
-}
-
-function areEqual<Type>(a: Type[], b: Type[]) {
-  return a.length === b.length && a.every((item) => b.includes(item));
-}
-
-function getMissingItems<Type>(actual: Type[], next: Type[]) {
-  return next.filter((item) => !actual.includes(item));
-}
-
-function getRedundantItems<Type>(actual: Type[], next: Type[]) {
-  return actual.filter((item) => !next.includes(item));
-}
+/// TSConfig
 
 async function readTSConfig(path: TSConfigPath) {
   const content = await readFile(path, "utf-8");
   return JSON.parse(content) as TSConfig;
+}
+
+function areReferencesEqual(a: TSConfigReference[], b: TSConfigReference[]) {
+  return areEqual(a.map(pathFromReference), b.map(pathFromReference));
+}
+
+function pathFromReference(reference: TSConfigReference) {
+  return reference.path;
 }
 
 async function mutateTSConfig(
@@ -667,19 +677,90 @@ function getTSConfigPath(workspace: WorkspacePath) {
   return relative(root, resolve(workspace, "tsconfig.json")) as TSConfigPath;
 }
 
-function getRelativeWorkspacePath(
-  dependency: WorkspacePath,
-  workspace?: WorkspacePath
-) {
-  return relative(workspace || root, dependency) as RelativeWorkspacePath;
+/// Types
+
+//// Package
+
+interface Package {
+  name: WorkspaceName;
+  dependencies: PackageDependencies;
+  devDependencies?: Record<WorkspaceName, string>;
+  workspaces?: string[];
 }
 
-function relativeWorkspacePathToWorkspacePath(
-  relativePath: RelativeWorkspacePath,
-  workspacePath: WorkspacePath
-) {
-  return relative(root, resolve(workspacePath, relativePath)) as WorkspacePath;
+type PackageDependencies = Record<WorkspaceName, string>;
+
+type PackagePath = OpaqueString<typeof packagePathBrand>;
+declare const packagePathBrand: unique symbol;
+
+//// TSConfig
+
+interface TSConfig {
+  compilerOptions?: {
+    paths?: TSConfigAliases;
+  };
+  files?: string[];
+  references?: TSConfigReference[];
 }
+
+type TSConfigAliases = Record<TSConfigAlias, [TSConfigAliasResolve]>;
+
+interface TSConfigReference {
+  path: TSConfigReferencePath;
+}
+
+type TSConfigAlias = OpaqueString<typeof tsConfigPathAliasBrand>;
+declare const tsConfigPathAliasBrand: unique symbol;
+
+type TSConfigReferencePath = OpaqueString<typeof tsConfigReferencePathBrand>;
+declare const tsConfigReferencePathBrand: unique symbol;
+
+type TSConfigAliasResolve = OpaqueString<typeof tsConfigPathResolveBrand>;
+declare const tsConfigPathResolveBrand: unique symbol;
+
+type TSConfigPath = OpaqueString<typeof tsConfigPathBrand>;
+declare const tsConfigPathBrand: unique symbol;
+
+//// Workspaces
+
+type WorkspacePath = OpaqueString<typeof workspacePathBrand>;
+declare const workspacePathBrand: unique symbol;
+
+type WorkspaceName = OpaqueString<typeof workspaceNameBrand>;
+declare const workspaceNameBrand: unique symbol;
+
+type WorkspaceFilePath = OpaqueString<typeof workspaceFilePathBrand>;
+declare const workspaceFilePathBrand: unique symbol;
+
+//// Build info
+
+interface BuildInfo {
+  program: {
+    fileNames: Record<BuildInfoFileIndex, BuildInfoFileName>;
+    referencedMap?: [BuildInfoFileId, BuildInfoListId][];
+    fileIdsList?: Record<BuildInfoListIndex, BuildInfoFileId[]>;
+  };
+}
+
+type BuildInfoPath = OpaqueString<typeof buildInfoPathBrand>;
+declare const buildInfoPathBrand: unique symbol;
+
+type BuildInfoFileId = OpaqueNumber<typeof buildInfoFileIdBrand>;
+declare const buildInfoFileIdBrand: unique symbol;
+
+type BuildInfoFileIndex = OpaqueNumber<typeof buildInfoFileIndexBrand>;
+declare const buildInfoFileIndexBrand: unique symbol;
+
+type BuildInfoFileName = OpaqueString<typeof buildInfoFileNameBrand>;
+declare const buildInfoFileNameBrand: unique symbol;
+
+type BuildInfoListId = OpaqueNumber<typeof buildInfoListIdBrand>;
+declare const buildInfoListIdBrand: unique symbol;
+
+type BuildInfoListIndex = OpaqueNumber<typeof buildInfoListIndexBrand>;
+declare const buildInfoListIndexBrand: unique symbol;
+
+/// Utils
 
 function debug(...message: any[]) {
   if (verbose) console.debug(...message);
@@ -719,86 +800,14 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-interface BuildInfo {
-  program: {
-    fileNames: Record<BuildInfoFileIndex, BuildInfoFileName>;
-    referencedMap?: [BuildInfoFileId, BuildInfoListId][];
-    fileIdsList?: Record<BuildInfoListIndex, BuildInfoFileId[]>;
-  };
+function areEqual<Type>(a: Type[], b: Type[]) {
+  return a.length === b.length && a.every((item) => b.includes(item));
 }
 
-interface PackageJSON {
-  name: WorkspaceName;
-  dependencies: Record<WorkspaceName, string>;
-  devDependencies?: Record<WorkspaceName, string>;
-  workspaces?: string[];
+function getMissingItems<Type>(actual: Type[], next: Type[]) {
+  return next.filter((item) => !actual.includes(item));
 }
 
-interface TSConfig {
-  compilerOptions?: {
-    paths?: TSConfigPaths;
-  };
-  files?: string[];
-  references?: TSConfigReference[];
+function getRedundantItems<Type>(actual: Type[], next: Type[]) {
+  return actual.filter((item) => !next.includes(item));
 }
-
-type TSConfigPaths = Record<
-  WorkspacePathPattern,
-  [RelativeWorkspacePathPattern]
->;
-
-interface TSConfigReference {
-  path: RelativeWorkspacePath;
-}
-
-type AbsolutePackageJSONPath = OpaqueString<
-  typeof absolutePackageJSONPathBrand
->;
-declare const absolutePackageJSONPathBrand: unique symbol;
-
-type PackageJSONPath = OpaqueString<typeof packageJSONPathBrand>;
-declare const packageJSONPathBrand: unique symbol;
-
-type WorkspacePath = OpaqueString<typeof workspacePathBrand>;
-declare const workspacePathBrand: unique symbol;
-
-type WorkspacePathPattern = OpaqueString<typeof workspacePathPatternBrand>;
-declare const workspacePathPatternBrand: unique symbol;
-
-type RelativeWorkspacePath = OpaqueString<typeof relativeWorkspacePathBrand>;
-declare const relativeWorkspacePathBrand: unique symbol;
-
-type RelativeWorkspacePathPattern = OpaqueString<
-  typeof relativeWorkspacePathPatternBrand
->;
-declare const relativeWorkspacePathPatternBrand: unique symbol;
-
-type WorkspaceName = OpaqueString<typeof workspaceNameBrand>;
-declare const workspaceNameBrand: unique symbol;
-
-type BuildInfoPath = OpaqueString<typeof buildInfoPathBrand>;
-declare const buildInfoPathBrand: unique symbol;
-
-type AbsoluteBuildInfoPath = OpaqueString<typeof absoluteBuildInfoPathBrand>;
-declare const absoluteBuildInfoPathBrand: unique symbol;
-
-type WorkspaceFilePath = OpaqueString<typeof workspaceFilePathBrand>;
-declare const workspaceFilePathBrand: unique symbol;
-
-type TSConfigPath = OpaqueString<typeof tsConfigPathBrand>;
-declare const tsConfigPathBrand: unique symbol;
-
-type BuildInfoFileId = OpaqueNumber<typeof buildInfoFileIdBrand>;
-declare const buildInfoFileIdBrand: unique symbol;
-
-type BuildInfoFileIndex = OpaqueNumber<typeof buildInfoFileIndexBrand>;
-declare const buildInfoFileIndexBrand: unique symbol;
-
-type BuildInfoFileName = OpaqueString<typeof buildInfoFileNameBrand>;
-declare const buildInfoFileNameBrand: unique symbol;
-
-type BuildInfoListId = OpaqueNumber<typeof buildInfoListIdBrand>;
-declare const buildInfoListIdBrand: unique symbol;
-
-type BuildInfoListIndex = OpaqueNumber<typeof buildInfoListIndexBrand>;
-declare const buildInfoListIndexBrand: unique symbol;
