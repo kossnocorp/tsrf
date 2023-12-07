@@ -224,28 +224,80 @@ async function processRootPackageDelete() {
 
 //// Workspace package.json events processing
 
-async function processWorkspacePackageCreate(packagePath: PackagePath) {
-  debug("Detected workspace package.json", packagePath);
+function processWorkspacePackageCreate(packagePath: PackagePath) {
+  return processWorkspacePackageWrite(packagePath, true);
+}
+
+async function processWorkspacePackageUpdate(packagePath: PackagePath) {
+  return processWorkspacePackageWrite(packagePath);
+}
+
+async function processWorkspacePackageWrite(
+  packagePath: PackagePath,
+  create?: boolean
+) {
+  debug(
+    `Detected workspace package.json ${create ? "create" : "update"}`,
+    packagePath
+  );
 
   const workspacePath = packagePathToWorkspacePath(packagePath);
-  const workspaceName = getWorkspaceName(workspacePath);
-  debug("Watching workspace", workspaceName, `(${dirname(packagePath)})`);
+  const prevName = getWorkspaceName(workspacePath);
 
   const pkg = await readPackage(packagePath);
   const dependencies = getPackageDependencies(pkg);
+  const workspaceName = pkg.name;
   debug("Found workspace dependencies", workspaceName, dependencies);
 
   // Assign the workspace links
   workspaceNames.set(workspacePath, workspaceName);
+  workspaceDependencies.delete(prevName);
   workspaceDependencies.set(workspaceName, dependencies);
 
-  return watchBuildInfo(workspacePath);
-}
+  if (!create && prevName !== workspaceName) {
+    log(
+      `Workspace name changed ${prevName} → ${workspaceName}, updating the references`
+    );
 
-async function processWorkspacePackageUpdate(packagePath: PackagePath) {
-  debug("Detected workspace package.json change, TODO:", packagePath);
-  warn("Function not implemented: processWorkspaceUnlink", packagePath);
-  // TODO:
+    // Update the references
+    await Promise.all(
+      Array.from(workspaceDependencies.entries()).map(([name, deps]) => {
+        if (!deps.includes(prevName)) return;
+
+        const workspacePath = getWorkspacePath(name);
+        return Promise.all([
+          // Update the packages
+          mutatePackage(getWorkspacePackagePath(workspacePath), (pkg) => {
+            if (pkg.dependencies && !pkg.devDependencies?.[prevName]) {
+              delete pkg.dependencies[prevName];
+              pkg.dependencies[workspaceName] = "*";
+              pkg.dependencies = sortObject(pkg.dependencies);
+            }
+
+            if (pkg.devDependencies && pkg.devDependencies[prevName]) {
+              delete pkg.devDependencies[prevName];
+              pkg.devDependencies[workspaceName] = "*";
+              pkg.devDependencies = sortObject(pkg.devDependencies);
+            }
+          }),
+
+          // Update references and aliases in TS config
+          mutateTSConfig(
+            getTSConfigPath(workspacePath),
+            (tsConfig) =>
+              tsConfig.references &&
+              mutateUpdateReferences(
+                tsConfig,
+                tsConfig.references,
+                workspacePath
+              )
+          ),
+        ]);
+      })
+    );
+  }
+
+  if (create) return watchBuildInfo(workspacePath);
 }
 
 async function processWorkspacePackageDelete(packagePath: PackagePath) {
@@ -360,58 +412,80 @@ async function processBuildInfoWrite(
 
   await mutateTSConfig(getTSConfigPath(workspacePath), (tsConfig) => {
     const references = referencesFromWorkspaces(workspacePath, buildInfoDeps);
-    const tsConfigReferences = tsConfig?.references || [];
-    const referencesUnchanged = areReferencesEqual(
-      references,
-      tsConfigReferences
-    );
-
-    if (referencesUnchanged) return false;
-
-    debug("References changed!");
-    debug("Actual references:", tsConfigReferences);
-    debug("The tsconfig.tsbuildinfo references:", references);
-
-    log(
-      `Writing ${green(
-        getWorkspaceName(workspacePath)
-      )} tsconfig.json with updated references list`
-    );
-    debug("References:", references);
-
-    tsConfig.references = references;
-
-    tsConfig.compilerOptions = tsConfig.compilerOptions || {};
-    tsConfig.compilerOptions.paths = tsConfig.compilerOptions.paths || {};
-
-    const redundantRefs = getRedundantItems(tsConfigReferences, references);
-    const missingRefs = getMissingItems(tsConfigReferences, references);
-
-    for (const { path: referencePath } of redundantRefs) {
-      const pathAlias = findRedundantAliases(
-        tsConfig.compilerOptions.paths,
-        referencePath
-      );
-      if (pathAlias) {
-        delete tsConfig.compilerOptions.paths[pathAlias];
-        delete tsConfig.compilerOptions.paths[pathAliasToGlob(pathAlias)];
-      }
-    }
-
-    for (const { path: referencePath } of missingRefs) {
-      const workspaceName = getWorkspaceName(
-        workspacePathFromReferencePath(referencePath, workspacePath)
-      );
-      const pathAlias = aliasFromWorkspaceName(workspaceName);
-
-      tsConfig.compilerOptions.paths[pathAlias] = [
-        referencePathToAliasResolve(referencePath),
-      ];
-      tsConfig.compilerOptions.paths[pathAliasToGlob(pathAlias)] = [
-        referencePathToAliashResolveGlob(referencePath),
-      ];
-    }
+    return mutateUpdateReferences(tsConfig, references, workspacePath);
   });
+}
+
+function mutateUpdateReferences(
+  tsConfig: TSConfig,
+  references: TSConfigReference[],
+  workspacePath: WorkspacePath
+) {
+  const prevTSConfig = cloneDeepJSON(tsConfig);
+  const tsConfigReferences = tsConfig?.references || [];
+
+  debug("References changed!");
+  debug("Actual references:", tsConfigReferences);
+  debug("The tsconfig.tsbuildinfo references:", references);
+
+  tsConfig.references = references;
+
+  const redundantRefs = getRedundantItems(tsConfigReferences, references);
+  const missingRefs = getMissingItems(tsConfigReferences, references);
+
+  mutateRemoveRedundantAliases(tsConfig, redundantRefs);
+  mutateAddMissingAliases(tsConfig, missingRefs, workspacePath);
+
+  if (deepEqualJSON(prevTSConfig, tsConfig)) return false;
+
+  log(
+    `Writing ${green(
+      getWorkspaceName(workspacePath)
+    )} tsconfig.json with updated references list`
+  );
+  debug("References:", references);
+}
+
+function mutateRemoveRedundantAliases(
+  tsConfig: TSConfig,
+  redundantRefs: TSConfigReference[]
+) {
+  tsConfig.compilerOptions = tsConfig.compilerOptions || {};
+  tsConfig.compilerOptions.paths = tsConfig.compilerOptions.paths || {};
+
+  for (const { path: referencePath } of redundantRefs) {
+    const pathAlias = findRedundantAliases(
+      tsConfig.compilerOptions.paths,
+      referencePath
+    );
+    if (pathAlias) {
+      delete tsConfig.compilerOptions.paths[pathAlias];
+      delete tsConfig.compilerOptions.paths[pathAliasToGlob(pathAlias)];
+    }
+  }
+}
+
+function mutateAddMissingAliases(
+  tsConfig: TSConfig,
+  missingRefs: TSConfigReference[],
+  workspacePath: WorkspacePath
+) {
+  tsConfig.compilerOptions = tsConfig.compilerOptions || {};
+  tsConfig.compilerOptions.paths = tsConfig.compilerOptions.paths || {};
+
+  for (const { path: referencePath } of missingRefs) {
+    const workspaceName = getWorkspaceName(
+      workspacePathFromReferencePath(referencePath, workspacePath)
+    );
+    const pathAlias = aliasFromWorkspaceName(workspaceName);
+
+    tsConfig.compilerOptions.paths[pathAlias] = [
+      referencePathToAliasResolve(referencePath),
+    ];
+    tsConfig.compilerOptions.paths[pathAliasToGlob(pathAlias)] = [
+      referencePathToAliashResolveGlob(referencePath),
+    ];
+  }
 }
 
 /// Package
@@ -435,12 +509,25 @@ function packageDependenciesToWorkspaceNames(
   return dependenciesNames.filter((name) => names.includes(name));
 }
 
-function getWorkspacePackagePath(workspace: WorkspacePath) {
-  return relative(root, resolve(workspace, "package.json")) as PackagePath;
+function getWorkspacePackagePath(workspacePath: WorkspacePath) {
+  return relative(root, resolve(workspacePath, "package.json")) as PackagePath;
 }
 
 function packagePathToWorkspacePath(packagePath: PackagePath) {
   return dirname(packagePath) as WorkspacePath;
+}
+
+async function mutatePackage(
+  packagePath: PackagePath,
+  mutator: (pkg: Package) => boolean | void
+) {
+  const pkg = await readPackage(packagePath);
+
+  const skipWrite = mutator(pkg) === false;
+  if (skipWrite) return;
+
+  const content = await format(JSON.stringify(pkg), { parser: "json" });
+  await writeFile(packagePath, content);
 }
 
 /// TSConfig
@@ -712,8 +799,10 @@ async function mutateTSConfig(
   mutator: (tsConfig: TSConfig) => boolean | void
 ) {
   const tsConfig = await readTSConfig(tsConfigPath);
+
   const skipWrite = mutator(tsConfig) === false;
   if (skipWrite) return;
+
   const content = await format(JSON.stringify(tsConfig), { parser: "json" });
   await writeFile(tsConfigPath, content);
 }
@@ -728,7 +817,7 @@ function getTSConfigPath(workspace: WorkspacePath) {
 
 interface Package {
   name: WorkspaceName;
-  dependencies: PackageDependencies;
+  dependencies?: PackageDependencies;
   devDependencies?: Record<WorkspaceName, string>;
   workspaces?: string[];
 }
@@ -855,4 +944,65 @@ function getMissingItems<Type>(actual: Type[], next: Type[]) {
 
 function getRedundantItems<Type>(actual: Type[], next: Type[]) {
   return actual.filter((item) => !next.includes(item));
+}
+
+function cloneDeepJSON<Type>(value: Type): Type {
+  if (typeof value !== "object" || value === null) return value;
+
+  if (Array.isArray(value))
+    return value.map((item) => cloneDeepJSON(item)) as Type;
+
+  const copiedObject: Record<string, any> = {};
+  for (const key in value)
+    if (Object.prototype.hasOwnProperty.call(value, key))
+      copiedObject[key] = cloneDeepJSON(value[key]);
+
+  return copiedObject as Type;
+}
+
+function deepEqualJSON<Type>(value1: Type, value2: Type): boolean {
+  if (value1 === value2) return true;
+
+  if (
+    typeof value1 !== "object" ||
+    typeof value2 !== "object" ||
+    value1 === null ||
+    value2 === null
+  )
+    return false;
+
+  if (Array.isArray(value1) && Array.isArray(value2)) {
+    if (value1.length !== value2.length) return false;
+
+    for (let i = 0; i < value1.length; i++)
+      if (!deepEqualJSON(value1[i], value2[i])) return false;
+
+    return true;
+  }
+
+  if (Array.isArray(value1) || Array.isArray(value2)) return false;
+
+  const keys1 = Object.keys(value1);
+  const keys2 = Object.keys(value2);
+
+  if (keys1.length !== keys2.length) return false;
+
+  for (const key of keys1) {
+    if (!Object.prototype.hasOwnProperty.call(value2, key)) return false;
+
+    if (!deepEqualJSON(value1[key as keyof Type], value2[key as keyof Type]))
+      return false;
+  }
+
+  return true;
+}
+
+function sortObject<Type extends Object>(obj: Type): Type {
+  const sortedObj = {} as Type;
+  Object.keys(obj)
+    .sort()
+    .forEach((key) => {
+      sortedObj[key as keyof Type] = obj[key as keyof Type];
+    });
+  return sortedObj;
 }
