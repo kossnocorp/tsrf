@@ -141,22 +141,63 @@ async function processRootPackageAdd() {
   );
   if (!rootPackage) return;
 
-  processRootPackageCreate(rootPackage);
+  return processRootPackageCreate(rootPackage);
 }
 
-async function processRootPackageCreate(initialPackage?: Package) {
+async function processRootPackageCreate(argPackage?: Package) {
   debug("Detected package.json create, initializing processing");
 
-  const rootPackage = initialPackage || (await readPackage(rootPackagePath));
+  // Use already read package.json if provided
+  const rootPackage = argPackage || (await readPackage(rootPackagePath));
 
-  const workspaces = await workspacesFromPackage(rootPackage);
-  debug("Found workspaces", workspaces);
+  const workspacePaths = await workspacesFromPackage(rootPackage);
+  debug("Found workspaces", workspacePaths);
 
-  // First we have to read names, so when we process workspace create event,
-  // we can get the dependency names.
-  await initWorkspaceNames(workspaces);
+  // Before doing anything, we need to parse and store the workspace names
+  // so they are always available for the rest of the processing
+  await initWorkspaceNames(workspacePaths);
 
-  return Promise.all(workspaces.map(watchWorkspacePackage));
+  // Update the workspace tsconfig.json files with proper config if necessary
+  await Promise.all(
+    workspacePaths.map((workspacePath) =>
+      mutateTSConfig(
+        getTSConfigPath(workspacePath),
+        (tsConfig, readFromDisk) => {
+          const result = mutateConfigureWorkspaceTSConfig(
+            tsConfig,
+            !readFromDisk
+          );
+          if (result !== false)
+            log(
+              `Configured ${green(
+                getWorkspaceName(workspacePath)
+              )} tsconfig.json`
+            );
+          return result;
+        },
+        () => cloneDeepJSON(defaultTSConfig)
+      )
+    )
+  );
+
+  // Setup the root config if necessary
+  await mutateTSConfig(
+    getTSConfigPath(),
+    (tsConfig) => {
+      const prevTSConfig = cloneDeepJSON(tsConfig);
+
+      delete tsConfig.include;
+      delete tsConfig.exclude;
+      tsConfig.files = [];
+      tsConfig.references = referencesFromWorkspacePaths(workspacePaths);
+
+      if (deepEqualJSON(tsConfig, prevTSConfig)) return false;
+      log("Configured the root tsconfig.json");
+    },
+    () => cloneDeepJSON(defaultRootTSConfig)
+  );
+
+  return Promise.all(workspacePaths.map(watchWorkspacePackage));
 }
 
 async function processRootPackageChange() {
@@ -282,16 +323,18 @@ async function processWorkspacePackageWrite(
           }),
 
           // Update references and aliases in TS config
-          mutateTSConfig(
-            getTSConfigPath(workspacePath),
-            (tsConfig) =>
-              tsConfig.references &&
-              mutateUpdateReferences(
-                tsConfig,
-                tsConfig.references,
-                workspacePath
-              )
-          ),
+          mutateTSConfig(getTSConfigPath(workspacePath), (tsConfig) => {
+            return [
+              mutateConfigureWorkspaceTSConfig(tsConfig),
+              tsConfig.references
+                ? mutateUpdateReferences(
+                    tsConfig,
+                    tsConfig.references,
+                    workspacePath
+                  )
+                : false,
+            ];
+          }),
         ]);
       })
     );
@@ -412,7 +455,10 @@ async function processBuildInfoWrite(
 
     mutateTSConfig(getTSConfigPath(workspacePath), (tsConfig) => {
       const references = referencesFromWorkspaces(workspacePath, buildInfoDeps);
-      return mutateUpdateReferences(tsConfig, references, workspacePath);
+      return [
+        mutateConfigureWorkspaceTSConfig(tsConfig),
+        mutateUpdateReferences(tsConfig, references, workspacePath),
+      ];
     }),
   ]);
 }
@@ -520,11 +566,14 @@ function packagePathToWorkspacePath(packagePath: PackagePath) {
 
 async function mutatePackage(
   packagePath: PackagePath,
-  mutator: (pkg: Package) => boolean | void
+  mutator: (pkg: Package) => boolean | Array<boolean | void> | void
 ) {
   const pkg = await readPackage(packagePath);
 
-  const skipWrite = mutator(pkg) === false;
+  const mutatorResult = mutator(pkg);
+  const skipWrite = Array.isArray(mutatorResult)
+    ? mutatorResult.every((result) => result === false)
+    : mutatorResult === false;
   if (skipWrite) return;
 
   const content = await format(JSON.stringify(pkg), { parser: "json" });
@@ -569,6 +618,14 @@ function referencesFromWorkspaces(
   }));
 }
 
+function referencesFromWorkspacePaths(
+  workspacePaths: WorkspacePath[]
+): TSConfigReference[] {
+  return workspacePaths.map((workspacePath) => ({
+    path: getReferencePath(workspacePath),
+  }));
+}
+
 function getReferencePath(
   dependencyPath: WorkspacePath,
   workspacePath?: WorkspacePath
@@ -578,6 +635,82 @@ function getReferencePath(
     dependencyPath
   ) as TSConfigReferencePath;
 }
+
+async function readTSConfig(path: TSConfigPath) {
+  const content = await readFile(path, "utf-8");
+  return JSON.parse(content) as TSConfig;
+}
+
+function areReferencesEqual(a: TSConfigReference[], b: TSConfigReference[]) {
+  return areEqual(a.map(pathFromReference), b.map(pathFromReference));
+}
+
+function pathFromReference(reference: TSConfigReference) {
+  return reference.path;
+}
+
+async function mutateTSConfig(
+  tsConfigPath: TSConfigPath,
+  mutator: (
+    tsConfig: TSConfig,
+    readFromDisk: boolean
+  ) => boolean | Array<boolean | void> | void,
+  getDefault?: () => TSConfig | undefined
+) {
+  const [tsConfig, readFromDisk] = await readTSConfig(tsConfigPath)
+    .then((config) => [config, true] as const)
+    .catch((err) => {
+      if (getDefault) return [getDefault(), false] as const;
+      error(`Error reading the ${tsConfigPath}`);
+      log(new Error().stack);
+      process.exit(1);
+    });
+  if (!tsConfig) return;
+
+  const mutatorResult = mutator(tsConfig, readFromDisk);
+  const skipWrite = Array.isArray(mutatorResult)
+    ? mutatorResult.every((result) => result === false)
+    : mutatorResult === false;
+  if (skipWrite) return;
+
+  const content = await format(JSON.stringify(tsConfig), { parser: "json" });
+  await writeFile(tsConfigPath, content);
+}
+
+function getTSConfigPath(workspace?: WorkspacePath) {
+  return relative(
+    root,
+    resolve(workspace || "./", "tsconfig.json")
+  ) as TSConfigPath;
+}
+
+function mutateConfigureWorkspaceTSConfig(tsConfig: TSConfig, force?: boolean) {
+  if (
+    !force &&
+    tsConfig.compilerOptions &&
+    tsConfig.compilerOptions.composite === true &&
+    tsConfig.compilerOptions.outDir === ".ts"
+  )
+    return false;
+
+  tsConfig.compilerOptions = tsConfig.compilerOptions || {};
+  Object.assign(tsConfig.compilerOptions, defaultTSConfig.compilerOptions);
+}
+
+const defaultRootTSConfig: TSConfig = {
+  files: [],
+  include: undefined,
+  exclude: undefined,
+};
+
+const defaultTSConfig: TSConfig = {
+  include: ["**/*.ts", "**/*.tsx"],
+  compilerOptions: {
+    composite: true,
+    outDir: ".ts",
+    tsBuildInfoFile: undefined,
+  },
+};
 
 /// Workspaces
 
@@ -780,38 +913,6 @@ function buildInfoFileIdToIndex(id: BuildInfoFileId) {
   return (id - 1) as BuildInfoFileIndex;
 }
 
-/// TSConfig
-
-async function readTSConfig(path: TSConfigPath) {
-  const content = await readFile(path, "utf-8");
-  return JSON.parse(content) as TSConfig;
-}
-
-function areReferencesEqual(a: TSConfigReference[], b: TSConfigReference[]) {
-  return areEqual(a.map(pathFromReference), b.map(pathFromReference));
-}
-
-function pathFromReference(reference: TSConfigReference) {
-  return reference.path;
-}
-
-async function mutateTSConfig(
-  tsConfigPath: TSConfigPath,
-  mutator: (tsConfig: TSConfig) => boolean | void
-) {
-  const tsConfig = await readTSConfig(tsConfigPath);
-
-  const skipWrite = mutator(tsConfig) === false;
-  if (skipWrite) return;
-
-  const content = await format(JSON.stringify(tsConfig), { parser: "json" });
-  await writeFile(tsConfigPath, content);
-}
-
-function getTSConfigPath(workspace: WorkspacePath) {
-  return relative(root, resolve(workspace, "tsconfig.json")) as TSConfigPath;
-}
-
 /// Types
 
 //// Package
@@ -832,9 +933,14 @@ declare const packagePathBrand: unique symbol;
 
 interface TSConfig {
   compilerOptions?: {
+    composite?: boolean;
     paths?: TSConfigAliases;
+    outDir?: string;
+    tsBuildInfoFile?: string | undefined;
   };
   files?: string[];
+  include?: string[] | undefined;
+  exclude?: string[] | undefined;
   references?: TSConfigReference[];
 }
 
