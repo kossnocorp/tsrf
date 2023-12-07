@@ -33,7 +33,7 @@
     "typescript": "^5.3.2"
   },
   "dependencies": {
-    "chokidar": "^3.5.3",
+    "@parcel/watcher": "^2.3.0",
     "glob": "^10.3.10",
     "picocolors": "^1.0.0",
     "prettier": "^3.1.0"

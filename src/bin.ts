@@ -1,4 +1,3 @@
-import { FSWatcher, watch } from "chokidar";
 import { readFile, writeFile, stat } from "fs/promises";
 import { glob } from "glob";
 import { dirname, relative, resolve } from "path";
@@ -6,6 +5,7 @@ import picocolors from "picocolors";
 import { format } from "prettier";
 import type { OpaqueNumber } from "typeroo/number";
 import type { OpaqueString } from "typeroo/string";
+import watcher from "@parcel/watcher";
 
 const { red, yellow, green, gray, blue } = picocolors;
 
@@ -13,7 +13,7 @@ const verbose = !!process.argv.find((arg) => arg === "--verbose");
 const showRedundant = !!process.argv.find((arg) => arg === "--redundant");
 
 const root = process.cwd();
-const rootPackageJSONPath = resolve(root, "package.json") as PackageJSONPath;
+const rootPackageJSONPath = "package.json" as PackageJSONPath;
 
 let watchedWorkspaces: WorkspacePath[] = [];
 let workspaceNames: Record<WorkspacePath, WorkspaceName> = {};
@@ -22,32 +22,135 @@ let workspaceDependencies: Record<WorkspaceName, WorkspaceName[]> = {};
 const unlinkedBuildInfos = new Set<BuildInfoPath>();
 const commandsReported = new Set<string>();
 
-const workspacesWatch = watchWorkspaces();
-const buildInfoWatch = watchBuildInfos();
+startWatcher().then(() => processPackageJSONAdd());
 
-watchPackageJSON();
+/// Watcher
 
-function watchWorkspaces() {
-  const workspacesWatch = watch([]);
+//// Globals
 
-  workspacesWatch.on("all", async (event, path: AbsolutePackageJSONPath) => {
-    switch (event) {
-      case "add":
-        return processWorkspaceAdd(path);
+const workspacePackageJSONWatchlist = new Set<PackageJSONPath>();
+const workspaceBuildInfoWatchlist = new Set<BuildInfoPath>();
 
-      case "change":
-        return processWorkspaceChange(path);
+//// Events processing
 
-      case "unlink":
-        return processWorkspaceUnlink(path);
+function startWatcher() {
+  return watcher.subscribe(root, (err, events) => {
+    if (err) {
+      error("Filesystem watcher error!");
+      log(err);
     }
-  });
 
-  return workspacesWatch;
+    events.forEach((event) => {
+      const path = relative(root, event.path);
+      console.log({ event, path });
+      switch (true) {
+        case path === rootPackageJSONPath:
+          return processPackageJSONWatchEvent(event);
+
+        case workspacePackageJSONWatchlist.has(path as PackageJSONPath):
+          return processWorkspacesWatchEvent(event, path as PackageJSONPath);
+
+        case workspaceBuildInfoWatchlist.has(path as BuildInfoPath):
+          return processBuildInfoWatchEvent(event, path as BuildInfoPath);
+      }
+    });
+  });
 }
 
-async function processWorkspaceAdd(absolutePath: AbsolutePackageJSONPath) {
-  const path = relativePackageJSONPath(absolutePath);
+function processPackageJSONWatchEvent(event: watcher.Event) {
+  switch (event.type) {
+    case "create":
+      return processPackageJSONCreate();
+
+    case "update":
+      return processPackageJSONChange();
+
+    case "delete":
+      return processPackageJSONDelete();
+  }
+}
+
+function processWorkspacesWatchEvent(
+  event: watcher.Event,
+  path: PackageJSONPath
+) {
+  switch (event.type) {
+    case "create":
+      return processWorkspaceCreate(path);
+
+    case "update":
+      return processWorkspaceUpdate(path);
+
+    case "delete":
+      return processWorkspaceDelete(path);
+  }
+}
+
+function processBuildInfoWatchEvent(event: watcher.Event, path: BuildInfoPath) {
+  switch (event.type) {
+    case "create":
+      return processBuildInfoCreate(path);
+
+    case "update":
+      return processBuildInfoUpdate(path);
+
+    case "delete":
+      return processBuildInfoDelete(path);
+  }
+}
+
+//// Watchlists management
+
+function watchWorkspace(workspacePath: WorkspacePath) {
+  debug("Watching workspace", workspacePath);
+  const packageJSONPath = workspacePackageJSONPath(workspacePath);
+  workspacePackageJSONWatchlist.add(packageJSONPath);
+
+  return stat(packageJSONPath)
+    .catch(() => {})
+    .then((stats) => stats && processWorkspaceCreate(packageJSONPath));
+}
+
+function watchBuildInfo(workspace: WorkspacePath) {
+  const buildInfoPath = getBuildInfoPath(workspace);
+  debug("Watching build info", workspace, buildInfoPath);
+  workspaceBuildInfoWatchlist.add(buildInfoPath);
+  return stat(buildInfoPath)
+    .catch(() => {})
+    .then((stats) => stats && processBuildInfoCreate(buildInfoPath));
+}
+
+//// Root package.json events processing
+
+async function processPackageJSONAdd() {
+  const rootPackageJSON = await readPackageJSON(rootPackageJSONPath).catch(() =>
+    warn(
+      "package.json not found, make sure you are in the root directory. The processing will begine once the file is created."
+    )
+  );
+  if (!rootPackageJSON) return;
+
+  processPackageJSONCreate(rootPackageJSON);
+}
+
+async function processPackageJSONCreate(initialPackageJSON?: PackageJSON) {
+  const rootPackageJSON =
+    initialPackageJSON || (await readPackageJSON(rootPackageJSONPath));
+  debug("Detected package.json, initializing processing");
+
+  const workspaces = (watchedWorkspaces = await getWorkspaces(rootPackageJSON));
+  debug("Found workspaces", workspaces);
+
+  // First we have to read names, so when we process workspace create event,
+  // we can get the dependency names.
+  await initWorkspaceNames(workspaces);
+
+  return Promise.all(workspaces.map(watchWorkspace));
+}
+
+//// Workspace package.json events processing
+
+async function processWorkspaceCreate(path: PackageJSONPath) {
   debug("Detected workspace package.json", path);
 
   const workspacePath = packageJSONPathToWorkspacePath(path);
@@ -61,52 +164,32 @@ async function processWorkspaceAdd(absolutePath: AbsolutePackageJSONPath) {
   debug("Found workspace dependencies", name, dependencies);
   workspaceDependencies[name] = dependencies;
 
-  watchBuildInfo(workspacePath);
+  return watchBuildInfo(workspacePath);
 }
 
-async function processWorkspaceChange(absolutePath: AbsolutePackageJSONPath) {
-  const path = relativePackageJSONPath(absolutePath);
+async function processWorkspaceUpdate(path: PackageJSONPath) {
   debug("Detected workspace package.json change, TODO:", path);
   warn("Function not implemented: processWorkspaceUnlink", path);
   // TODO:
 }
 
-async function processWorkspaceUnlink(absolutePath: AbsolutePackageJSONPath) {
-  const path = relativePackageJSONPath(absolutePath);
+async function processWorkspaceDelete(path: PackageJSONPath) {
   debug("Detected workspace package.json unlink, TODO:", path);
   warn("Function not implemented: processWorkspaceUnlink", path);
   // TODO:
 }
 
-function watchBuildInfos() {
-  const buildInfoWatch = watch([]);
+//// Build info events processing
 
-  buildInfoWatch.on("all", async (event, path: AbsoluteBuildInfoPath) => {
-    switch (event) {
-      case "add":
-        return processBuildInfoAdd(path);
-
-      case "change":
-        return processBuildInfoChange(path);
-
-      case "unlink":
-        return processBuildInfoUnlink(path);
-    }
-  });
-
-  return buildInfoWatch;
+async function processBuildInfoCreate(path: BuildInfoPath) {
+  return processBuildInfoWrite(path, true);
 }
 
-async function processBuildInfoAdd(absolutePath: AbsoluteBuildInfoPath) {
-  return processBuildInfoUpdate(absolutePath, true);
+async function processBuildInfoUpdate(path: BuildInfoPath) {
+  return processBuildInfoWrite(path, false);
 }
 
-async function processBuildInfoChange(absolutePath: AbsoluteBuildInfoPath) {
-  return processBuildInfoUpdate(absolutePath, false);
-}
-
-function processBuildInfoUnlink(absolutePath: AbsoluteBuildInfoPath) {
-  const buildInfoPath = relativeBuildInfoPath(absolutePath);
+function processBuildInfoDelete(buildInfoPath: BuildInfoPath) {
   debug("Detected build info unlink", buildInfoPath);
 
   const workspacePath = buildInfoPathToWorkspacePath(buildInfoPath);
@@ -121,17 +204,16 @@ function processBuildInfoUnlink(absolutePath: AbsoluteBuildInfoPath) {
   unlinkedBuildInfos.add(buildInfoPath);
 }
 
-async function processBuildInfoUpdate(
-  absolutePath: AbsoluteBuildInfoPath,
-  add?: boolean
+async function processBuildInfoWrite(
+  buildInfoPath: BuildInfoPath,
+  create?: boolean
 ) {
-  const buildInfoPath = relativeBuildInfoPath(absolutePath);
-  debug(`Detected build ${add ? "add" : "change"}`, buildInfoPath);
+  debug(`Detected build ${create ? "create" : "update"}`, buildInfoPath);
 
   const workspacePath = buildInfoPathToWorkspacePath(buildInfoPath);
   const workspaceName = getWorkspaceName(workspacePath);
 
-  if (add && unlinkedBuildInfos.has(buildInfoPath)) {
+  if (create && unlinkedBuildInfos.has(buildInfoPath)) {
     unlinkedBuildInfos.delete(buildInfoPath);
     log(
       `The ${blue(
@@ -263,6 +345,8 @@ async function processBuildInfoUpdate(
   });
 }
 
+////
+
 function workspaceNameToPathPattern(name: WorkspaceName) {
   return name as unknown as WorkspacePathPattern;
 }
@@ -293,6 +377,7 @@ function relativeWorkspacePathToGlobPattern(
 function getTSConfigGlobPath(pathPattern: WorkspacePathPattern) {
   return (pathPattern + "/*") as WorkspacePathPattern;
 }
+
 function dependeciesToReferences(
   workspacePath: WorkspacePath,
   dependencies: WorkspaceName[]
@@ -305,55 +390,17 @@ function dependeciesToReferences(
   }));
 }
 
-function watchBuildInfo(workspace: WorkspacePath) {
-  const path = buildWathInfoPath(workspace);
-  debug("Watching build info", workspace, path);
-
-  buildInfoWatch.add(path);
-}
-
-function watchPackageJSON() {
-  stat(rootPackageJSONPath).catch(() => {
-    warn(
-      "package.json not found, make sure you are in the root directory. The processing will begine once the file is created."
-    );
-  });
-
-  const packageJSONWatch = watch(rootPackageJSONPath);
-
-  packageJSONWatch.on("all", async (event, _path) => {
-    switch (event) {
-      case "add":
-        return processPackageJSONAdd();
-
-      case "change":
-        return processPackageJSONChange();
-
-      case "unlink":
-        return processPackageJSONUnlink();
-    }
-  });
-}
-
-async function processPackageJSONAdd() {
-  debug("Detected package.json, initializing processing");
-  const workspaces = (watchedWorkspaces = await readWorkspaces());
-  debug("Found workspaces", workspaces);
-  await initWorkspaceNames(workspaces);
-  workspaces.forEach(watchWorkspace);
-}
-
 async function processPackageJSONChange() {
   debug("Detected package.json change, updating watchlist");
   warn("Function not implemented: processPackageJSONChange");
   // TODO:
 }
 
-async function processPackageJSONUnlink() {
+async function processPackageJSONDelete() {
   warn("package.json has been deleted, pausing processing");
 
-  unwatch(workspacesWatch);
-  unwatch(buildInfoWatch);
+  workspaceBuildInfoWatchlist.clear();
+  workspacePackageJSONWatchlist.clear();
 
   commandsReported.clear();
   unlinkedBuildInfos.clear();
@@ -367,7 +414,9 @@ async function initWorkspaceNames(workspaces: WorkspacePath[]) {
   return Promise.all(
     workspaces.map(async (workspace) => {
       try {
-        const packageJSON = await readPackageJSON(packageJSONPath(workspace));
+        const packageJSON = await readPackageJSON(
+          workspacePackageJSONPath(workspace)
+        );
         const name = packageJSON.name as WorkspaceName;
         workspaceNames[workspace] = name;
       } catch (_error) {
@@ -380,16 +429,10 @@ async function initWorkspaceNames(workspaces: WorkspacePath[]) {
   );
 }
 
-async function watchWorkspace(path: WorkspacePath) {
-  workspacesWatch.add(packageJSONPath(path));
-}
-
-async function readWorkspaces(): Promise<WorkspacePath[]> {
-  const packageJSON = await readPackageJSON(rootPackageJSONPath);
-  const workspaces = (await glob(
-    packageJSON.workspaces || []
-  )) as WorkspacePath[];
-  return workspaces;
+async function getWorkspaces(
+  packageJSON: PackageJSON
+): Promise<WorkspacePath[]> {
+  return (await glob(packageJSON.workspaces || [])) as WorkspacePath[];
 }
 
 async function getBuildInfoDependencies(
@@ -557,7 +600,7 @@ function extractWorkspaceDependencies(
   return dependenciesNames.filter((name) => names.includes(name));
 }
 
-function packageJSONPath(workspace: WorkspacePath) {
+function workspacePackageJSONPath(workspace: WorkspacePath) {
   return relative(root, resolve(workspace, "package.json")) as PackageJSONPath;
 }
 
@@ -573,7 +616,7 @@ function relativeBuildInfoPath(buildInfoPath: AbsoluteBuildInfoPath) {
   return relative(root, buildInfoPath) as BuildInfoPath;
 }
 
-function buildWathInfoPath(workspace: WorkspacePath) {
+function getBuildInfoPath(workspace: WorkspacePath) {
   return relative(
     root,
     resolve(workspace, ".ts/tsconfig.tsbuildinfo")
@@ -674,16 +717,6 @@ async function withRetry<Type>(
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function unwatch(watcher: FSWatcher) {
-  const watched = watcher.getWatched();
-
-  const allPaths = Object.entries(watched).flatMap(([dir, files]) =>
-    files.map((file) => `${dir}/${file}`).concat(dir)
-  );
-
-  return watcher.unwatch(allPaths);
 }
 
 interface BuildInfo {
