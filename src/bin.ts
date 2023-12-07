@@ -122,13 +122,13 @@ function watchWorkspacePackage(workspacePath: WorkspacePath) {
     .then((stats) => stats && processWorkspacePackageCreate(packagePath));
 }
 
-function watchBuildInfo(workspacePath: WorkspacePath) {
+async function watchBuildInfo(workspacePath: WorkspacePath) {
   const buildInfoPath = getBuildInfoPath(workspacePath);
   debug("Watching build info", workspacePath, buildInfoPath);
   buildInfoWatchlist.add(buildInfoPath);
-  return stat(buildInfoPath)
+  await stat(buildInfoPath)
     .catch(() => {})
-    .then((stats) => stats && processBuildInfoCreate(buildInfoPath));
+    .then<any>((stats) => stats && processBuildInfoCreate(buildInfoPath));
 }
 
 //// Root package.json events processing
@@ -364,29 +364,6 @@ async function processBuildInfoWrite(
   const missing = getMissingItems(workspaceDeps, buildInfoDeps);
   const redundant = getRedundantItems(workspaceDeps, buildInfoDeps);
 
-  if (missing.length) {
-    const command = `npm install -w ${workspaceName} ${missing
-      .map((name) => name + "@*")
-      .join(" ")}`;
-
-    if (!commandsReported.has(command)) {
-      commandsReported.add(command);
-
-      warn(
-        `Detected missing dependencies in ${green(
-          workspaceName
-        )} package.json:`,
-        gray(missing.join(", "))
-      );
-
-      log(
-        `${gray("Please run")}:
-    
-    ${blue(command)}`
-      );
-    }
-  }
-
   if (showRedundant && redundant.length) {
     const command = `npm uninstall -w ${workspaceName} ${redundant
       .map((name) => name + "@*")
@@ -410,10 +387,34 @@ async function processBuildInfoWrite(
     }
   }
 
-  await mutateTSConfig(getTSConfigPath(workspacePath), (tsConfig) => {
-    const references = referencesFromWorkspaces(workspacePath, buildInfoDeps);
-    return mutateUpdateReferences(tsConfig, references, workspacePath);
-  });
+  if (missing.length)
+    debouncedLog(
+      `Dependencies changed, run the command to update package-lock.json:
+
+    ${blue(`npm install`)}`
+    );
+
+  return Promise.all([
+    missing.length &&
+      mutatePackage(getWorkspacePackagePath(workspacePath), (pkg) => {
+        log(
+          `Detected missing dependencies in ${green(
+            workspaceName
+          )}, updating package.json`
+        );
+        pkg.dependencies = pkg.dependencies || {};
+        missing.reduce((deps, name) => {
+          deps[name] = "*";
+          return deps;
+        }, pkg.dependencies);
+        pkg.dependencies = sortObject(pkg.dependencies);
+      }),
+
+    mutateTSConfig(getTSConfigPath(workspacePath), (tsConfig) => {
+      const references = referencesFromWorkspaces(workspacePath, buildInfoDeps);
+      return mutateUpdateReferences(tsConfig, references, workspacePath);
+    }),
+  ]);
 }
 
 function mutateUpdateReferences(
@@ -900,6 +901,8 @@ function debug(...message: any[]) {
   if (verbose) console.debug(...message);
 }
 
+const debouncedLog = debounceByArgs(log, 50);
+
 function log(...message: any[]) {
   console.log(...message, "\n");
 }
@@ -1005,4 +1008,22 @@ function sortObject<Type extends Object>(obj: Type): Type {
       sortedObj[key as keyof Type] = obj[key as keyof Type];
     });
   return sortedObj;
+}
+
+function debounceByArgs<Fn extends (...args: any[]) => void>(
+  func: Fn,
+  waitFor: number
+): (...args: Parameters<Fn>) => void {
+  const timeouts: Record<string, NodeJS.Timeout> = {};
+
+  return function (...args: Parameters<Fn>): void {
+    const argsKey = JSON.stringify(args);
+    const later = () => {
+      delete timeouts[argsKey];
+      func(...args);
+    };
+
+    clearTimeout(timeouts[argsKey]);
+    timeouts[argsKey] = setTimeout(later, waitFor);
+  };
 }
