@@ -1,5 +1,7 @@
 # tsrf
 
+**🚧 Work in progress, [follow for updates](https://twitter.com/kossnocorp)**
+
 tsrf is a build tool that elevates developer experience and performance of type-checking TypeScript code in a monorepo.
 
 It combines the power of [npm workspaces](https://docs.npmjs.com/cli/using-npm/workspaces) with [TypeScript Project References](https://www.typescriptlang.org/docs/handbook/project-references.html)
