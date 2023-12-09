@@ -1,7 +1,6 @@
 /// CLI
 
 import { watch } from "./watch.js";
-import { Utils } from "./utils.js";
 
 const command = process.argv[2];
 
@@ -9,12 +8,9 @@ const command = process.argv[2];
 
 function main() {
   switch (command) {
+    default:
     case "watch":
       return watch();
-
-    default:
-      Utils.error(`Unknown command ${command}`);
-      process.exit(1);
   }
 }
 

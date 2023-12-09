@@ -21,34 +21,16 @@ export namespace Workspaces {
   export type WorkspaceFilePath = OpaqueString<typeof workspaceFilePathBrand>;
   declare const workspaceFilePathBrand: unique symbol;
 
-  /// Functions
-
-  export async function readWorkspaceNames(workspacePaths: Set<WorkspacePath>) {
-    const namesResults = await Promise.all(
-      Array.from(workspacePaths).map(async (workspacePath) => {
-        const pkg = await Package.readPackage(
-          Package.getWorkspacePackagePath(workspacePath)
-        ).catch(() => {});
-
-        if (!pkg) {
-          Utils.warn(
-            `Workspace package.json not found, ignoring ${green(
-              workspacePath
-            )}`,
-            workspacePath
-          );
-          State.missingPackages.add(workspacePath);
-          return;
-        }
-
-        return [workspacePath, pkg.name] as const;
-      })
-    );
-
-    namesResults.forEach(
-      (nameResult) => nameResult && State.workspaceNames.set(...nameResult)
-    );
+  export enum Requirement {
+    Package = 0b10,
+    TSConfig = 0b01,
   }
+
+  // Constants
+
+  export const allRequirements = Requirement.Package | Requirement.TSConfig;
+
+  /// Functions
 
   export async function workspacesFromPackage(
     pkg: Package.Package
@@ -58,13 +40,15 @@ export namespace Workspaces {
     );
   }
 
-  export function workspacePathsWithPackages(
-    workspacePaths: Set<WorkspacePath>
-  ) {
+  export function matchingWorkspaces(workspacePaths: Set<WorkspacePath>) {
     const withPackages = new Set<WorkspacePath>(workspacePaths);
-    State.missingPackages.forEach((workspacePath) =>
-      withPackages.delete(workspacePath)
+
+    withPackages.forEach(
+      (workspacePath) =>
+        !Workspaces.hasAllRequirements(workspacePath) &&
+        withPackages.delete(workspacePath)
     );
+
     return withPackages;
   }
 
@@ -176,5 +160,35 @@ export namespace Workspaces {
         }
       }
     );
+  }
+
+  export function addRequirement(
+    path: WorkspacePath,
+    requirement: Requirement
+  ): void {
+    const current = State.workspaceRequirements.get(path) || 0;
+    State.workspaceRequirements.set(path, current | requirement);
+  }
+
+  export function removeRequirement(
+    path: WorkspacePath,
+    requirement: Requirement
+  ): void {
+    const current = State.workspaceRequirements.get(path) || 0;
+    State.workspaceRequirements.set(path, current & ~requirement);
+  }
+
+  export function hasRequirement(
+    path: WorkspacePath,
+    requirement: Requirement
+  ): boolean {
+    const current = State.workspaceRequirements.get(path) || 0;
+    return (current & requirement) === requirement;
+  }
+
+  export function hasAllRequirements(path: WorkspacePath): boolean {
+    const current = State.workspaceRequirements.get(path) || 0;
+    console.log({ path, current, allRequirements });
+    return (current & allRequirements) === allRequirements;
   }
 }

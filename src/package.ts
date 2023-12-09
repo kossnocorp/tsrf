@@ -26,6 +26,40 @@ export namespace Package {
 
   /// Functions
 
+  export async function readPackages(
+    workspacePaths: Set<Workspaces.WorkspacePath>
+  ) {
+    const namesResults = await Promise.all(
+      Array.from(workspacePaths).map(async (workspacePath) => {
+        const pkg = await readPackage(
+          getWorkspacePackagePath(workspacePath)
+        ).catch(() => {});
+
+        if (pkg) {
+          Workspaces.addRequirement(
+            workspacePath,
+            Workspaces.Requirement.Package
+          );
+          return [workspacePath, pkg.name] as const;
+        }
+
+        Utils.warn(
+          `Workspace package.json not found, ignoring ${green(workspacePath)}`,
+          workspacePath
+        );
+
+        Workspaces.removeRequirement(
+          workspacePath,
+          Workspaces.Requirement.Package
+        );
+      })
+    );
+
+    namesResults.forEach(
+      (nameResult) => nameResult && State.workspaceNames.set(...nameResult)
+    );
+  }
+
   export async function readPackage(packagePath: PackagePath) {
     const content = await readFile(packagePath, "utf-8");
     return JSON.parse(content) as Package;

@@ -1,31 +1,33 @@
-import { OpaqueString } from "typeroo/string/index.js";
-import { Workspaces } from "./workspaces.js";
-import { relative, resolve } from "path";
 import { readFile, writeFile } from "fs/promises";
-import { Utils } from "./utils.js";
-import { format } from "prettier";
-import { glob } from "glob";
+import { relative, resolve } from "path";
 import picocolors from "picocolors";
+import { format } from "prettier";
+import { OpaqueString } from "typeroo/string/index.js";
 import { State } from "./state.js";
+import { Utils } from "./utils.js";
+import { Workspaces } from "./workspaces.js";
 
-const { red, yellow, green, gray, blue } = picocolors;
+const { green } = picocolors;
 
 export namespace TSConfig {
   /// Types
 
   export interface TSConfig {
-    compilerOptions?: {
-      composite?: boolean;
-      paths?: TSConfigAliases;
-      outDir?: string;
-      tsBuildInfoFile?: string | undefined;
-      skipLibCheck?: boolean;
-      jsx?: "preserve" | undefined;
-    };
+    compilerOptions?: TSConfigCompilerOptions;
     files?: string[];
     include?: string[] | undefined;
     exclude?: string[] | undefined;
     references?: TSConfigReference[];
+  }
+
+  export interface TSConfigCompilerOptions {
+    composite?: boolean;
+    paths?: TSConfigAliases;
+    outDir?: string;
+    tsBuildInfoFile?: string | undefined;
+    noEmit?: boolean;
+    skipLibCheck?: boolean;
+    jsx?: "preserve" | undefined;
   }
 
   export type TSConfigAliases = Record<TSConfigAlias, [TSConfigAliasResolve]>;
@@ -51,6 +53,32 @@ export namespace TSConfig {
   declare const tsConfigPathBrand: unique symbol;
 
   /// Functions
+
+  export function readTSConfigs(workspacePaths: Set<Workspaces.WorkspacePath>) {
+    return Promise.all(
+      Array.from(workspacePaths).map(async (workspacePath) => {
+        const config = await readTSConfig(getTSConfigPath(workspacePath)).catch(
+          () => {}
+        );
+
+        if (config)
+          return Workspaces.addRequirement(
+            workspacePath,
+            Workspaces.Requirement.TSConfig
+          );
+
+        Utils.warn(
+          `Workspace tsconfig.json not found, ignoring ${green(workspacePath)}`,
+          workspacePath
+        );
+
+        Workspaces.removeRequirement(
+          workspacePath,
+          Workspaces.Requirement.TSConfig
+        );
+      })
+    );
+  }
 
   function aliasFromWorkspaceName(workspaceName: Workspaces.WorkspaceName) {
     return workspaceName as unknown as TSConfigAlias;
@@ -109,38 +137,35 @@ export namespace TSConfig {
     ) as TSConfigReferencePath;
   }
 
-  async function readTSConfig(path: TSConfigPath) {
+  export async function readTSConfig(path: TSConfigPath) {
     const content = await readFile(path, "utf-8");
     return JSON.parse(content) as TSConfig;
-  }
-
-  function areReferencesEqual(a: TSConfigReference[], b: TSConfigReference[]) {
-    return Utils.areEqual(a.map(pathFromReference), b.map(pathFromReference));
-  }
-
-  function pathFromReference(reference: TSConfigReference) {
-    return reference.path;
   }
 
   async function mutateTSConfig(
     tsConfigPath: TSConfigPath,
     mutator: (
       tsConfig: TSConfig,
-      readFromDisk: boolean
-    ) => Utils.MaybePromise<Utils.MaybeArray<boolean | void>>,
-    getDefault?: () => Utils.MaybePromise<TSConfig | undefined>
+      fromDisk: boolean
+    ) => Utils.MaybeArray<boolean | void>,
+    getDefault?: () => TSConfig
   ) {
-    const [tsConfig, readFromDisk] = await readTSConfig(tsConfigPath)
-      .then((config) => [config, true] as const)
-      .catch(async (err) => {
-        if (getDefault) return [await getDefault(), false] as const;
+    let fromDisk = true;
+    let tsConfig = await readTSConfig(tsConfigPath).catch(() => {});
+
+    if (!tsConfig) {
+      if (getDefault) {
+        tsConfig = getDefault();
+        fromDisk = false;
+        if (!tsConfig) return;
+      } else {
         Utils.error(`Error reading the ${tsConfigPath}`);
         Utils.log(new Error().stack);
         process.exit(1);
-      });
-    if (!tsConfig) return;
+      }
+    }
 
-    const mutatorResult = await mutator(tsConfig, readFromDisk);
+    const mutatorResult = mutator(tsConfig, fromDisk);
 
     const skipWrite = Array.isArray(mutatorResult)
       ? mutatorResult.every((result) => result === false)
@@ -158,24 +183,17 @@ export namespace TSConfig {
     ) as TSConfigPath;
   }
 
-  function mutateConfigureWorkspaceTSConfig(
-    tsConfig: TSConfig,
-    jsx: boolean,
-    force: boolean
-  ) {
+  function mutateConfigureWorkspaceTSConfig(tsConfig: TSConfig) {
     if (
-      !force &&
-      tsConfig.compilerOptions &&
-      tsConfig.compilerOptions.composite === true &&
-      tsConfig.compilerOptions.outDir === ".ts"
+      isCompilerOptionsSatisfactory(
+        tsConfig?.compilerOptions,
+        defaultTSConfigCompilerOptions
+      )
     )
       return false;
 
     tsConfig.compilerOptions = tsConfig.compilerOptions || {};
-    Object.assign(
-      tsConfig.compilerOptions,
-      defaultTSConfig(jsx).compilerOptions
-    );
+    Object.assign(tsConfig.compilerOptions, defaultTSConfigCompilerOptions);
   }
 
   const defaultRootTSConfig: TSConfig = {
@@ -184,78 +202,74 @@ export namespace TSConfig {
     exclude: undefined,
   };
 
-  function defaultTSConfig(jsx: boolean) {
-    const config: TSConfig = {
-      include: ["**/*.ts"],
-      compilerOptions: {
-        composite: true,
-        outDir: ".ts",
-        skipLibCheck: true,
-        tsBuildInfoFile: undefined,
-      },
-    } satisfies TSConfig;
+  const defaultTSConfigCompilerOptions: TSConfigCompilerOptions = {
+    composite: true,
+    outDir: ".ts",
+    tsBuildInfoFile: ".ts/tsconfig.tsbuildinfo",
+    noEmit: false,
+  };
 
-    if (jsx) {
-      config.compilerOptions!.jsx = "preserve";
-      config.include!.push("react");
+  function isCompilerOptionsSatisfactory(
+    options: TSConfigCompilerOptions | undefined,
+    defaultOptions: TSConfigCompilerOptions
+  ): boolean {
+    if (!options) return false;
+
+    for (const key in defaultOptions) {
+      if (!defaultOptions.hasOwnProperty(key)) continue;
+
+      const defaultValue = defaultOptions[key as keyof TSConfigCompilerOptions];
+      const optionValue = options[key as keyof TSConfigCompilerOptions];
+
+      if (defaultValue === undefined && optionValue) return false;
+      else if (defaultValue !== undefined && optionValue !== defaultValue)
+        return false;
     }
 
-    return config;
+    return true;
   }
 
-  export function bootstrapWorkspaceTSConfigs(
+  export function configureTSConfigs(
     workspacePaths: Set<Workspaces.WorkspacePath>
   ) {
-    return Promise.all(
-      Array.from(workspacePaths).map(bootstrapWorkspaceTSConfig)
-    );
+    return Promise.all(Array.from(workspacePaths).map(configureTSConfig));
   }
 
-  async function bootstrapWorkspaceTSConfig(
-    workspacePath: Workspaces.WorkspacePath
-  ) {
-    // Detect if the workspace has ts/tsx files
-    const workspaceFiles = await glob(resolve(workspacePath, "**/*.{ts,tsx}"), {
-      ignore: ["node_modules", ".ts"],
-    });
-    const workspaceHasJSX = workspaceFiles.some((file) =>
-      file.endsWith(".tsx")
-    );
+  async function configureTSConfig(workspacePath: Workspaces.WorkspacePath) {
+    return mutateTSConfig(getTSConfigPath(workspacePath), (tsConfig) => {
+      const result = mutateConfigureWorkspaceTSConfig(tsConfig);
 
-    return mutateTSConfig(
-      getTSConfigPath(workspacePath),
-      (tsConfig, readFromDisk) => {
-        const result = mutateConfigureWorkspaceTSConfig(
-          tsConfig,
-          workspaceHasJSX,
-          !readFromDisk
+      if (result !== false)
+        Utils.log(
+          `Configured ${green(
+            Workspaces.getWorkspaceName(workspacePath)
+          )} tsconfig.json`
         );
-        if (result !== false)
-          Utils.log(
-            `Configured ${green(
-              Workspaces.getWorkspaceName(workspacePath)
-            )} tsconfig.json`
-          );
-        return result;
-      },
-      () => defaultTSConfig(workspaceHasJSX)
-    );
+
+      return result;
+    });
   }
 
-  export function bootstrapRootTSConfig(
-    workspacePaths: Set<Workspaces.WorkspacePath>
-  ) {
+  export function configureRoot(workspacePaths: Set<Workspaces.WorkspacePath>) {
     return mutateTSConfig(
       getTSConfigPath(),
-      (tsConfig) => {
-        const prevTSConfig = Utils.cloneDeepJSON(tsConfig);
+      (tsConfig, fromDisk) => {
+        const references = referencesFromWorkspacePaths(workspacePaths);
+
+        if (
+          fromDisk &&
+          !tsConfig.include &&
+          !tsConfig.exclude &&
+          tsConfig.files?.length === 0 &&
+          areReferencesEqual(tsConfig.references || [], references)
+        )
+          return false;
 
         delete tsConfig.include;
         delete tsConfig.exclude;
         tsConfig.files = [];
-        tsConfig.references = referencesFromWorkspacePaths(workspacePaths);
+        tsConfig.references = references;
 
-        if (Utils.deepEqualJSON(tsConfig, prevTSConfig)) return false;
         Utils.log("Configured the root tsconfig.json");
       },
       () => Utils.cloneDeepJSON(defaultRootTSConfig)
@@ -267,23 +281,21 @@ export namespace TSConfig {
   ) {
     // Use the existing references to get the up-to-date names
     return mutateTSConfig(getTSConfigPath(workspacePath), (tsConfig) => [
-      // TODO: Figure out how to better support this
-      // mutateConfigureWorkspaceTSConfig(tsConfig),
+      mutateConfigureWorkspaceTSConfig(tsConfig),
       tsConfig.references
         ? mutateUpdateReferences(tsConfig, tsConfig.references, workspacePath)
         : false,
     ]);
   }
 
-  export function updateTSConfigReferences(
+  export function updateReferences(
     workspacePath: Workspaces.WorkspacePath,
     deps: Workspaces.WorkspaceName[]
   ) {
     return mutateTSConfig(getTSConfigPath(workspacePath), (tsConfig) => {
       const references = referencesFromWorkspaceNames(workspacePath, deps);
       return [
-        // TODO: Figure out how to efficiently track of the JSX support
-        // mutateConfigureWorkspaceTSConfig(tsConfig),
+        mutateConfigureWorkspaceTSConfig(tsConfig),
         mutateUpdateReferences(tsConfig, references, workspacePath),
       ];
     });
@@ -362,5 +374,16 @@ export namespace TSConfig {
         referencePathToAliashResolveGlob(referencePath),
       ];
     }
+  }
+
+  function areReferencesEqual(a: TSConfigReference[], b: TSConfigReference[]) {
+    return Utils.areEqual(
+      a.map(pathFromReference).sort(),
+      b.map(pathFromReference).sort()
+    );
+  }
+
+  function pathFromReference(reference: TSConfigReference) {
+    return reference.path;
   }
 }

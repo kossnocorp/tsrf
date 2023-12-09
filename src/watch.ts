@@ -29,17 +29,10 @@ export async function watch() {
 
 const showRedundant = !!process.argv.find((arg) => arg === "--redundant");
 
-/// Constants
-
-const root = process.cwd();
-const rootPackagePath = "package.json" as Package.PackagePath;
+/// Processes managment
 
 // Child processes
 const children = new Set<ChildProcessWithoutNullStreams>();
-
-let watcherSubscription: watcher.AsyncSubscription;
-
-/// Processes managment
 
 function stopAllChildren() {
   children.forEach((child) => child.kill("SIGINT"));
@@ -50,7 +43,7 @@ function stopAllChildren() {
 
 function startTSC() {
   const tscChild = spawn("tsc", ["--build", "--watch", "--pretty"], {
-    cwd: root,
+    cwd: State.root,
     shell: true,
   });
 
@@ -72,19 +65,25 @@ function startTSC() {
 
 //// Events processing
 
+let watcherSubscription: watcher.AsyncSubscription;
+
 function startWatcher() {
-  return watcher.subscribe(root, (err, events) => {
+  return watcher.subscribe(State.root, (err, events) => {
     if (err) {
       Utils.error("Filesystem watcher error!");
       Utils.log(err);
     }
 
     events.forEach((event) => {
-      const path = relative(root, event.path);
+      const path = relative(State.root, event.path);
 
       switch (true) {
-        case path === rootPackagePath:
+        case path === State.rootPackagePath:
           return processRootPackageWatchEvent(event);
+
+        case !State.watching.current:
+          // Paused, only process root package.json events
+          return;
 
         case State.workspacePackagesWatchlist.has(path as Package.PackagePath):
           return processWorkspacePackageWatchEvent(
@@ -176,10 +175,11 @@ async function watchBuildInfo(workspacePath: Workspaces.WorkspacePath) {
 //// Root package.json events processing
 
 async function processRootPackageAdd() {
-  const rootPackage = await Package.readPackage(rootPackagePath).catch(() =>
-    Utils.warn(
-      "package.json not found, make sure you are in the root directory. The processing will begine once the file is created."
-    )
+  const rootPackage = await Package.readPackage(State.rootPackagePath).catch(
+    () =>
+      Utils.warn(
+        "package.json not found, make sure you are in the root directory. The processing will begine once the file is created."
+      )
   );
   if (!rootPackage) return;
 
@@ -191,46 +191,50 @@ async function processRootPackageCreate(argPackage?: Package.Package) {
 
   // Use already read package.json if provided or read it
   const rootPackage =
-    argPackage || (await Package.readPackage(rootPackagePath));
+    argPackage || (await Package.readPackage(State.rootPackagePath));
 
   // Find all workspaces on the filesystem using the package globs
   const workspacePaths = await Workspaces.workspacesFromPackage(rootPackage);
   Utils.debug("Found workspaces", workspacePaths);
 
-  // Before doing anything, we need to parse and store the workspace names
-  // so they are always available for the rest of the processing
-  await Workspaces.readWorkspaceNames(workspacePaths);
+  // Before doing anything, we need to parse packages, save which workspaces
+  // have missing package.json and store the workspace names, so they are
+  // always available for the rest of the processing
+  await Package.readPackages(workspacePaths);
 
-  // Now remove all workspaces without package.json, using the missing packages
-  // list generated during the workspace names initialization, and start
-  // watching the rest
-  const pathsWithPackages =
-    Workspaces.workspacePathsWithPackages(workspacePaths);
-  Utils.debug("Workspaces with with package.json", pathsWithPackages);
+  // Now read the tsconfig.json files and store the config presence. We need it
+  // so we can know which workspaces to ignore.
+  await TSConfig.readTSConfigs(workspacePaths);
+
+  // Now remove all workspaces without package.json and tsconfig.json and start
+  // watching the rest.
+  const matchingWorkspacePaths = Workspaces.matchingWorkspaces(workspacePaths);
+
+  Utils.debug("Mathcing workspaces", matchingWorkspacePaths);
 
   // Update the workspace tsconfig.json files with proper config if necessary
-  await TSConfig.bootstrapWorkspaceTSConfigs(pathsWithPackages);
+  await TSConfig.configureTSConfigs(matchingWorkspacePaths);
 
   // Setup the root config from workspaces if necessary
-  await TSConfig.bootstrapRootTSConfig(pathsWithPackages);
+  await TSConfig.configureRoot(matchingWorkspacePaths);
 
-  return Promise.all(Array.from(pathsWithPackages).map(watchWorkspacePackage));
+  return Promise.all(
+    Array.from(matchingWorkspacePaths).map(watchWorkspacePackage)
+  );
 }
 
 async function processRootPackageChange() {
   Utils.debug("Detected package.json change, updating watchlist");
 
+  // Unpause the processing if paused
+  State.watch();
+
   // Read the package
-  const rootPackage = await Package.readPackage(rootPackagePath);
+  const rootPackage = await Package.readPackage(State.rootPackagePath);
 
   // Find all workspaces on the filesystem using the package globs
   const workspacePaths = await Workspaces.workspacesFromPackage(rootPackage);
   Utils.debug("Found workspaces", workspacePaths);
-
-  // TODO: Remove the code as we don't need it anymore
-  // // Now remove all workspaces without package.json, using the missing packages
-  // // list generated during the workspace names initialization
-  // mutateIgnoreWorkspacesWithoutPackage(workspacePaths);
 
   // Now check if the workspaces list has changed
   const watchedWorkspaces = Workspaces.getWatchedWorkspacePaths();
@@ -275,31 +279,23 @@ async function processRootPackageChange() {
     State.workspaceNames.delete(workspacePath);
   });
 
-  // Update the workspace names before adding to the watchlist so that
-  // the new workspaces are properly initialized
-  await Workspaces.readWorkspaceNames(missingWorkspaces);
+  // Read missing workspaces package.json and assign the names
+  await Package.readPackages(missingWorkspaces);
 
-  // Add missing workspaces
-  missingWorkspaces.forEach(watchWorkspacePackage);
+  // Read missing workspaces tsconfig.json and assign the config presence
+  await TSConfig.readTSConfigs(missingWorkspaces);
+
+  // Now remove all workspaces without package.json and tsconfig.json and start
+  // watching the rest.
+  const matchingWorkspacePaths = Workspaces.matchingWorkspaces(workspacePaths);
+
+  // Watch all missing packages
+  matchingWorkspacePaths.forEach(watchWorkspacePackage);
 }
 
 async function processRootPackageDelete() {
   Utils.warn("package.json has been deleted, pausing processing");
-
-  // Clean up watchlists
-  State.buildInfoWatchlist.clear();
-  State.workspacePackagesWatchlist.clear();
-
-  // Clean up DX state
-  State.commandsReported.clear();
-  State.missingBuildInfos.clear();
-
-  // Clean up links
-  State.workspaceDependencies.clear();
-  State.workspaceNames.clear();
-
-  // Clean up state
-  State.missingPackages.clear();
+  State.pause();
 }
 
 //// Workspace package.json events processing
@@ -321,14 +317,13 @@ async function processWorkspacePackageWrite(
     packagePath
   );
 
-  // Remove from missing list if it was there
-  if (create)
-    State.missingPackages.delete(
-      Package.packagePathToWorkspacePath(packagePath)
-    );
-
   // Get the workspace path
   const workspacePath = Package.packagePathToWorkspacePath(packagePath);
+
+  // Mark that the package is not missing anymore
+  if (create)
+    Workspaces.addRequirement(workspacePath, Workspaces.Requirement.Package);
+
   // Store the previous name
   const prevName = !create && Workspaces.getWorkspaceName(workspacePath);
 
@@ -366,8 +361,10 @@ async function processWorkspacePackageWrite(
     await Workspaces.renameWorkspaceReferences(prevName, workspaceName);
   }
 
-  // Start watching the build info if necessary
-  if (create) return watchBuildInfo(workspacePath);
+  // Start watching the build info if it's a create event and the workspace has
+  // all requirements
+  if (create /*&& Workspaces.hasAllRequirements(workspacePath)*/)
+    return watchBuildInfo(workspacePath);
 }
 
 async function processWorkspacePackageDelete(packagePath: Package.PackagePath) {
@@ -463,7 +460,7 @@ async function processBuildInfoWrite(
     missing.length && Package.addMissingDependencies(workspacePath, missing),
 
     // Update the references in the tsconfig.json
-    TSConfig.updateTSConfigReferences(workspacePath, buildInfoDeps),
+    TSConfig.updateReferences(workspacePath, buildInfoDeps),
   ]);
 }
 
