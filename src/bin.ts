@@ -5,9 +5,6 @@ import { Utils } from "./utils.js";
 
 const command = process.argv[2];
 
-if (command !== "start" && command !== "init") {
-}
-
 /// Main
 
 function main() {
