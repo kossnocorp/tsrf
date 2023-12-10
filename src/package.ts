@@ -13,7 +13,7 @@ export namespace Package {
   /// Types
 
   export interface Package {
-    name: Workspaces.WorkspaceName;
+    name?: Workspaces.WorkspaceName | undefined;
     dependencies?: PackageDependencies;
     devDependencies?: Record<Workspaces.WorkspaceName, string>;
     workspaces?: string[];

@@ -94,13 +94,13 @@ export namespace TSConfig {
   }
 
   function referencePathToAliasResolve(referencePath: TSConfigReferencePath) {
-    return referencePath as unknown as TSConfigAliasResolve;
+    return `${referencePath}/` as TSConfigAliasResolve;
   }
 
   function referencePathToAliashResolveGlob(
     referencePath: TSConfigReferencePath
   ) {
-    return (referencePath + "/*") as TSConfigAliasResolve;
+    return `${referencePath}/*` as TSConfigAliasResolve;
   }
 
   function pathAliasToGlob(pathAlias: TSConfigAlias) {
@@ -176,7 +176,7 @@ export namespace TSConfig {
     await writeFile(tsConfigPath, content);
   }
 
-  function getTSConfigPath(workspace?: Workspaces.WorkspacePath) {
+  export function getTSConfigPath(workspace?: Workspaces.WorkspacePath) {
     return relative(
       State.root,
       resolve(workspace || "./", "tsconfig.json")

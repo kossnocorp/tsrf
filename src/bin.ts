@@ -1,5 +1,6 @@
 /// CLI
 
+import { doctor } from "./doctor.js";
 import { watch } from "./watch.js";
 
 const command = process.argv[2];
@@ -8,6 +9,9 @@ const command = process.argv[2];
 
 function main() {
   switch (command) {
+    case "doctor":
+      return doctor();
+
     default:
     case "watch":
       return watch();

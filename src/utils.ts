@@ -19,6 +19,10 @@ export namespace Utils {
 
   export const debouncedLog = debounceByArgs(log, 50);
 
+  export function print(...message: any[]) {
+    console.log(...message);
+  }
+
   export function log(...message: any[]) {
     console.log(...message, "\n");
   }
