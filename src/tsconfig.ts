@@ -119,7 +119,7 @@ export namespace TSConfig {
     }));
   }
 
-  function referencesFromWorkspacePaths(
+  export function referencesFromWorkspacePaths(
     workspacePaths: Set<Workspaces.WorkspacePath>
   ): TSConfigReference[] {
     return Array.from(workspacePaths).map((workspacePath) => ({
@@ -202,14 +202,14 @@ export namespace TSConfig {
     exclude: undefined,
   };
 
-  const defaultTSConfigCompilerOptions: TSConfigCompilerOptions = {
+  export const defaultTSConfigCompilerOptions: TSConfigCompilerOptions = {
     composite: true,
     outDir: ".ts",
     tsBuildInfoFile: ".ts/tsconfig.tsbuildinfo",
     noEmit: false,
   };
 
-  function isCompilerOptionsSatisfactory(
+  export function isCompilerOptionsSatisfactory(
     options: TSConfigCompilerOptions | undefined,
     defaultOptions: TSConfigCompilerOptions
   ): boolean {
@@ -227,6 +227,18 @@ export namespace TSConfig {
     }
 
     return true;
+  }
+
+  export function isRootTSConfigSatisfactory(
+    tsConfig: TSConfig,
+    references: TSConfigReference[]
+  ) {
+    return (
+      !tsConfig.include &&
+      !tsConfig.exclude &&
+      tsConfig.files?.length === 0 &&
+      areReferencesEqual(tsConfig.references || [], references)
+    );
   }
 
   export function configureTSConfigs(
@@ -256,13 +268,7 @@ export namespace TSConfig {
       (tsConfig, fromDisk) => {
         const references = referencesFromWorkspacePaths(workspacePaths);
 
-        if (
-          fromDisk &&
-          !tsConfig.include &&
-          !tsConfig.exclude &&
-          tsConfig.files?.length === 0 &&
-          areReferencesEqual(tsConfig.references || [], references)
-        )
+        if (fromDisk && isRootTSConfigSatisfactory(tsConfig, references))
           return false;
 
         delete tsConfig.include;

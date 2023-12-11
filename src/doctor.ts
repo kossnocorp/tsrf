@@ -1,15 +1,10 @@
-import watcher from "@parcel/watcher";
-import { ChildProcessWithoutNullStreams, spawn } from "child_process";
-import { stat } from "fs/promises";
-import { relative } from "path";
+import { glob } from "glob";
 import picocolors from "picocolors";
-import { BuildInfo } from "./buildinfo.js";
 import { Package } from "./package.js";
 import { State } from "./state.js";
 import { TSConfig } from "./tsconfig.js";
 import { Utils } from "./utils.js";
 import { Workspaces } from "./workspaces.js";
-import { glob } from "glob";
 
 const { green, gray, blue, bold, red, yellow } = picocolors;
 
@@ -17,10 +12,7 @@ const { green, gray, blue, bold, red, yellow } = picocolors;
 
 export async function doctor() {
   const rootPackage = await checkRootPackage();
-  await checkWorkspaces(rootPackage);
-  // await processRootPackageAdd();
-  // await startTSC();
-  // watcherSubscription = await startWatcher();
+  await checkWorkspacesWithRootTSConfig(rootPackage);
 }
 
 /// CLI
@@ -49,7 +41,7 @@ async function checkRootPackage() {
   return rootPackage;
 }
 
-async function checkWorkspaces(rootPackage: Package.Package) {
+async function checkWorkspacesWithRootTSConfig(rootPackage: Package.Package) {
   const workspacePaths = await Workspaces.workspacesFromPackage(rootPackage);
 
   if (!workspacePaths.size) {
@@ -79,26 +71,13 @@ async function checkWorkspaces(rootPackage: Package.Package) {
       return;
     }
 
-    report.checks.forEach((check) => {
-      const status =
-        check.status === "ok"
-          ? green("OK")
-          : check.status === "info"
-            ? yellow("OK")
-            : bold(red("FAIL"));
-
-      const bullet =
-        check.status === "ok"
-          ? green("○")
-          : check.status === "info"
-            ? yellow("●")
-            : red("●");
-
-      Utils.print(`    ${bullet} ${check.message}: ${status}`);
-    });
+    report.checks.forEach((check) => printCheck(check.status, check.message));
 
     Utils.print("\n");
   });
+
+  const rootOk = await checkRootTSConfig(workspacePaths);
+  Utils.print("\n");
 
   const redundantWorkspaces = reports.filter((report) => report.redundant);
 
@@ -118,14 +97,14 @@ async function checkWorkspaces(rootPackage: Package.Package) {
 
   if (!fix && anyIssues) {
     Utils.log(
-      `${red("►")} To automatically fix the issues, run:\n\n    ${gray(
+      `${red("►")} To automatically fix the failing issues, run:\n\n    ${gray(
         `npx tsrf doctor --fix`
       )}`
     );
   }
 
-  if (!redundantWorkspaces.length && !anyIssues) {
-    Utils.log(`${green("►")} All workspaces are valid!`);
+  if (rootOk && !redundantWorkspaces.length && !anyIssues) {
+    Utils.log(`${green("►")} All is OK!`);
   }
 }
 
@@ -186,14 +165,67 @@ async function checkWorkspace(
     return report;
   }
 
-  // TODO: Check the tsconfig settings
+  if (
+    !TSConfig.isCompilerOptionsSatisfactory(
+      tsConfig?.compilerOptions,
+      TSConfig.defaultTSConfigCompilerOptions
+    )
+  ) {
+    fail(`tsconfig.json needs to be configured`);
+    return report;
+  }
 
   ok(`tsconfig.json`);
 
   return report;
 }
 
+async function checkRootTSConfig(
+  workspacePaths: Set<Workspaces.WorkspacePath>
+): Promise<boolean> {
+  Utils.print(`${blue("Project root")}:\n`);
+
+  printCheck("ok", "package.json");
+
+  const tsConfig = await TSConfig.readTSConfig(State.rootTSConfigPath).catch(
+    () => {}
+  );
+
+  if (!tsConfig) {
+    printCheck("fail", "tsconfig.json not found or it's invalid");
+    return false;
+  }
+  const references = TSConfig.referencesFromWorkspacePaths(workspacePaths);
+
+  if (!TSConfig.isRootTSConfigSatisfactory(tsConfig, references)) {
+    printCheck("fail", "tsconfig.json needs to be configured");
+    return false;
+  }
+
+  printCheck("ok", "tsconfig.json");
+
+  return true;
+}
+
+/// Utils
+
+function printCheck(status: CheckStatus, message: string) {
+  const statusStr =
+    status === "ok"
+      ? green("OK")
+      : status === "info"
+        ? yellow("OK")
+        : bold(red("FAIL"));
+
+  const bullet =
+    status === "ok" ? green("○") : status === "info" ? yellow("●") : red("●");
+
+  Utils.print(`    ${bullet} ${message}: ${statusStr}`);
+}
+
 /// Types
+
+type CheckStatus = "ok" | "fail" | "info";
 
 interface Report {
   name: Workspaces.WorkspaceName | undefined;
