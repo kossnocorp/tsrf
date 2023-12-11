@@ -24,11 +24,27 @@ Additionally, it maintains module dependencies so you don't have to add a worksp
 
 ## Getting started
 
-To get started, install [`tsrf` npm package](https://www.npmjs.com/package/tsrf) and run `tsrf` command:
+To get started, install [`tsrf` npm package](https://www.npmjs.com/package/tsrf):
 
 ```bash
 npm install tsrf
+```
 
+Now run the doctor command to check the compatibility and required changes:
+
+```bash
+npx tsrf doctor
+```
+
+It will give you a breakdown of required changes, that can be made via `doctor --fix`:
+
+```bash
+npx tsrf doctor --fix
+```
+
+Now you're ready to start the watch mode:
+
+```bash
 npx tsrf
 ```
 
