@@ -4,6 +4,7 @@ import picocolors from "picocolors";
 import { format } from "prettier";
 import { OpaqueString } from "typeroo/string/index.js";
 import { State } from "./state.js";
+import { Config } from "./config.js";
 import { Utils } from "./utils.js";
 import { Workspaces } from "./workspaces.js";
 
@@ -202,15 +203,19 @@ export namespace TSConfig {
     exclude: undefined,
   };
 
-  export function defaultTSConfig(tsx: boolean): TSConfig {
-    return {
-      include: ["**/*.ts"].concat(tsx ? ["**/*.tsx"] : []),
+  export function defaultTSConfig(
+    config: Config.Config,
+    tsx: boolean
+  ): TSConfig {
+    return Utils.deepMerge(config.tsconfig || {}, {
+      include:
+        config.tsconfig?.include || ["**/*.ts"].concat(tsx ? ["**/*.tsx"] : []),
       compilerOptions: {
         ...defaultTSConfigCompilerOptions,
         jsx: tsx ? "preserve" : undefined,
         skipLibCheck: true,
       },
-    };
+    });
   }
 
   export const defaultTSConfigCompilerOptions: TSConfigCompilerOptions = {

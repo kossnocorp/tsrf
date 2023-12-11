@@ -1,13 +1,14 @@
+import { rm, writeFile } from "fs/promises";
 import { glob } from "glob";
+import { basename } from "path";
 import picocolors from "picocolors";
+import { format } from "prettier";
+import { Config } from "./config.js";
 import { Package } from "./package.js";
 import { State } from "./state.js";
 import { TSConfig } from "./tsconfig.js";
 import { Utils } from "./utils.js";
 import { Workspaces } from "./workspaces.js";
-import { rmdir, writeFile } from "fs/promises";
-import { format } from "prettier";
-import { basename } from "path";
 
 const { green, gray, blue, bold, red, yellow, cyan, magenta, italic } =
   picocolors;
@@ -69,10 +70,12 @@ async function checkWorkspacesWithRootTSConfig(rootPackage: Package.Package) {
     Array.from(workspacePaths).map(checkWorkspace)
   );
 
+  reports.sort((a, b) => (a.path > b.path ? 1 : -1));
+
   reports.forEach((report) => {
     Utils.print(`Workspace ${bold(green(report.path))}:\n`);
 
-    if (report.redundant) {
+    if (report.redundant && (!fix || !doDelete)) {
       Utils.print(
         `    ${printBullet(
           "info"
@@ -80,6 +83,7 @@ async function checkWorkspacesWithRootTSConfig(rootPackage: Package.Package) {
           `rm -rf ${report.path}\n`
         )}`
       );
+
       return;
     }
 
@@ -118,7 +122,7 @@ async function checkWorkspacesWithRootTSConfig(rootPackage: Package.Package) {
 
   const redundantWorkspaces = reports.filter((report) => report.redundant);
 
-  if (redundantWorkspaces.length) {
+  if (redundantWorkspaces.length && !doDelete) {
     Utils.print(
       `${yellow(
         "►"
@@ -190,34 +194,33 @@ async function checkWorkspace(
 
   const tsFiles = await glob(`${workspacePath}/**/*.{ts,tsx}`, {
     ignore: globIgnore,
+    nodir: true,
   });
 
   // First check when tsconfig.json is missing if the workspace is empty
-  if (!tsConfig) {
-    if (!tsFiles.length) {
-      if (!pkg) {
-        const anyFiles = await glob(`${workspacePath}/**/*`, {
-          ignore: globIgnore,
-        });
+  if (!tsConfig && !pkg && !tsFiles.length) {
+    const anyFiles = await glob(`${workspacePath}/**/*`, {
+      ignore: globIgnore,
+      nodir: true,
+    });
 
-        if (!anyFiles.length) {
-          if (fix && doDelete) {
-            await rmdir(workspacePath, { recursive: true });
-            fixedCheck(report, `removed empty workspace`);
-          } else {
-            report.redundant = true;
-          }
+    if (!anyFiles.length) {
+      report.redundant = true;
 
-          return report;
-        }
+      if (fix && doDelete) {
+        await rm(workspacePath, { recursive: true });
+        fixedCheck(report, `removed empty workspace`);
       }
+
+      return report;
     }
   }
 
   if (pkg) okCheck(report, "package.json");
   else {
     if (fix) {
-      const name = (report.name = generateWorkspaceName(workspacePath));
+      const config = await Config.getConfig();
+      const name = (report.name = generateWorkspaceName(config, workspacePath));
       await writeJSON(packagePath, { name });
       fixedCheck(report, `created package.json with name ${name}`);
     } else {
@@ -227,7 +230,8 @@ async function checkWorkspace(
 
   if (pkg && !pkg.name) {
     if (fix) {
-      const name = (report.name = generateWorkspaceName(workspacePath));
+      const config = await Config.getConfig();
+      const name = (report.name = generateWorkspaceName(config, workspacePath));
       await writeJSON(packagePath, { ...pkg, name });
       fixedCheck(report, `set package.json name to ${name}`);
     } else {
@@ -247,8 +251,9 @@ async function checkWorkspace(
 
   if (!tsConfig) {
     if (fix) {
+      const config = await Config.getConfig();
       const jsx = tsFiles.some((file) => file.endsWith(".tsx"));
-      await writeJSON(tsConfigPath, TSConfig.defaultTSConfig(jsx));
+      await writeJSON(tsConfigPath, TSConfig.defaultTSConfig(config, jsx));
       fixedCheck(report, `created tsconfig.json`);
     } else {
       failCheck(report, `tsconfig.json not found or it's invalid`);
@@ -384,8 +389,14 @@ function formatJSON(config: Package.Package | TSConfig.TSConfig) {
   return format(JSON.stringify(config), { parser: "json" });
 }
 
-function generateWorkspaceName(workspacePath: Workspaces.WorkspacePath) {
-  return basename(workspacePath) as Workspaces.WorkspaceName;
+function generateWorkspaceName(
+  config: Config.Config,
+  workspacePath: Workspaces.WorkspacePath
+) {
+  const base = basename(workspacePath);
+  return (
+    config.namespace ? `@${config.namespace}/${base}` : base
+  ) as Workspaces.WorkspaceName;
 }
 
 function findNameDuplicates(reports: WorkspaceReport[]) {

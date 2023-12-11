@@ -35,23 +35,44 @@ export namespace Package {
           getWorkspacePackagePath(workspacePath)
         ).catch(() => {});
 
-        if (pkg) {
+        if (pkg?.name) {
           Workspaces.addRequirement(
             workspacePath,
-            Workspaces.Requirement.Package
+            Workspaces.Requirement.Package | Workspaces.Requirement.PackageName
           );
           return [workspacePath, pkg.name] as const;
         }
 
-        Utils.warn(
-          `Workspace package.json not found, ignoring ${green(workspacePath)}`,
-          workspacePath
-        );
+        if (pkg && !pkg.name) {
+          Utils.warn(
+            `Workspace package.json name is missing, ignoring ${green(
+              workspacePath
+            )}`,
+            workspacePath
+          );
 
-        Workspaces.removeRequirement(
-          workspacePath,
-          Workspaces.Requirement.Package
-        );
+          Workspaces.addRequirement(
+            workspacePath,
+            Workspaces.Requirement.Package
+          );
+
+          Workspaces.removeRequirement(
+            workspacePath,
+            Workspaces.Requirement.PackageName
+          );
+        } else {
+          Utils.warn(
+            `Workspace package.json not found, ignoring ${green(
+              workspacePath
+            )}`,
+            workspacePath
+          );
+
+          Workspaces.removeRequirement(
+            workspacePath,
+            Workspaces.Requirement.Package | Workspaces.Requirement.PackageName
+          );
+        }
       })
     );
 

@@ -22,13 +22,15 @@ export namespace Workspaces {
   declare const workspaceFilePathBrand: unique symbol;
 
   export enum Requirement {
-    Package = 0b10,
-    TSConfig = 0b01,
+    TSConfig = 0b001,
+    Package = 0b010,
+    PackageName = 0b100,
   }
 
   // Constants
 
-  export const allRequirements = Requirement.Package | Requirement.TSConfig;
+  export const allRequirements =
+    Requirement.Package | Requirement.PackageName | Requirement.TSConfig;
 
   /// Functions
 
@@ -188,7 +190,6 @@ export namespace Workspaces {
 
   export function hasAllRequirements(path: WorkspacePath): boolean {
     const current = State.workspaceRequirements.get(path) || 0;
-    console.log({ path, current, allRequirements });
     return (current & allRequirements) === allRequirements;
   }
 }

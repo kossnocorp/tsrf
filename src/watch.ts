@@ -161,6 +161,8 @@ function watchWorkspacePackage(workspacePath: Workspaces.WorkspacePath) {
 
 async function watchBuildInfo(workspacePath: Workspaces.WorkspacePath) {
   const buildInfoPath = BuildInfo.getBuildInfoPath(workspacePath);
+  if (State.buildInfoWatchlist.has(buildInfoPath)) return;
+
   Utils.debug("Watching build info", workspacePath, buildInfoPath);
 
   // Add to the watchlist
@@ -335,36 +337,48 @@ async function processWorkspacePackageWrite(
   const workspaceName = pkg.name;
   Utils.debug("Found workspace dependencies", workspaceName, dependencies);
 
-  // Assign the workspace name
-  State.workspaceNames.set(workspacePath, workspaceName);
-
-  // If not create (no prev name) and the name has changed...
-  if (prevName && prevName !== workspaceName) {
-    // Copy the dependencies from the previous name
-    const prevDeps = Workspaces.getWorkspaceDependencies(prevName);
-    // Set the dependencies for the new name
-    State.workspaceDependencies.set(workspaceName, prevDeps);
-    // Remove the dependencies for the previous name
-    State.workspaceDependencies.delete(prevName);
-  }
-
-  // If just created and the build info dependencies are not there then set
-  // them to the package dependencies
-  create && State.workspaceDependencies.set(workspaceName, dependencies);
-
-  // If the name has changed
-  if (prevName && prevName !== workspaceName) {
-    Utils.log(
-      `Workspace name changed ${prevName} → ${workspaceName}, updating the references`
+  if (workspaceName) {
+    // Assign the workspace name
+    State.workspaceNames.set(workspacePath, workspaceName);
+    Workspaces.addRequirement(
+      workspacePath,
+      Workspaces.Requirement.PackageName
     );
-    // Update the references
-    await Workspaces.renameWorkspaceReferences(prevName, workspaceName);
+
+    // If not create (no prev name) and the name has changed...
+    if (prevName && prevName !== workspaceName) {
+      // Copy the dependencies from the previous name
+      const prevDeps = Workspaces.getWorkspaceDependencies(prevName);
+      // Set the dependencies for the new name
+      State.workspaceDependencies.set(workspaceName, prevDeps);
+      // Remove the dependencies for the previous name
+      State.workspaceDependencies.delete(prevName);
+    }
+
+    // If just created and the build info dependencies are not there then set
+    // them to the package dependencies
+    create && State.workspaceDependencies.set(workspaceName, dependencies);
+
+    // If the name has changed
+    if (prevName && prevName !== workspaceName) {
+      Utils.log(
+        `Workspace name changed ${prevName} → ${workspaceName}, updating the references`
+      );
+      // Update the references
+      await Workspaces.renameWorkspaceReferences(prevName, workspaceName);
+    }
+  } else {
+    // Remove the workspace name
+    State.workspaceNames.delete(workspacePath);
+    prevName && State.workspaceDependencies.delete(prevName);
+    Workspaces.removeRequirement(
+      workspacePath,
+      Workspaces.Requirement.PackageName
+    );
   }
 
-  // Start watching the build info if it's a create event and the workspace has
-  // all requirements
-  if (create /*&& Workspaces.hasAllRequirements(workspacePath)*/)
-    return watchBuildInfo(workspacePath);
+  // Ensure the we're watching the buildinfo:
+  return watchBuildInfo(workspacePath);
 }
 
 async function processWorkspacePackageDelete(packagePath: Package.PackagePath) {

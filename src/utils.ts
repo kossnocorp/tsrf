@@ -139,6 +139,29 @@ export namespace Utils {
     return true;
   }
 
+  export function deepMerge(value1: any, value2: any) {
+    if (typeof value2 !== "object" || !value2) return value2;
+
+    if (Array.isArray(value2)) {
+      if (!Array.isArray(value1)) return value2;
+
+      const result = [...value1];
+      value2.forEach((item, index) => {
+        result[index] = deepMerge(value1[index] || null, item);
+      });
+      return result;
+    }
+
+    if (typeof value1 !== "object" || Array.isArray(value1) || !value1)
+      return value2;
+
+    const result: Record<string, any> = { ...value1 };
+    Object.entries(value2).forEach(([key, value]) => {
+      result[key] = deepMerge(value1[key] || null, value);
+    });
+    return result;
+  }
+
   export function sortObject<Type extends Object>(obj: Type): Type {
     const sortedObj = {} as Type;
     Object.keys(obj)
