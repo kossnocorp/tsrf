@@ -196,11 +196,22 @@ export namespace TSConfig {
     Object.assign(tsConfig.compilerOptions, defaultTSConfigCompilerOptions);
   }
 
-  const defaultRootTSConfig: TSConfig = {
+  export const defaultRootTSConfig: TSConfig = {
     files: [],
     include: undefined,
     exclude: undefined,
   };
+
+  export function defaultTSConfig(tsx: boolean): TSConfig {
+    return {
+      include: ["**/*.ts"].concat(tsx ? ["**/*.tsx"] : []),
+      compilerOptions: {
+        ...defaultTSConfigCompilerOptions,
+        jsx: tsx ? "preserve" : undefined,
+        skipLibCheck: true,
+      },
+    };
+  }
 
   export const defaultTSConfigCompilerOptions: TSConfigCompilerOptions = {
     composite: true,
@@ -244,14 +255,19 @@ export namespace TSConfig {
   export function configureTSConfigs(
     workspacePaths: Set<Workspaces.WorkspacePath>
   ) {
-    return Promise.all(Array.from(workspacePaths).map(configureTSConfig));
+    return Promise.all(
+      Array.from(workspacePaths).map((path) => configureTSConfig(path))
+    );
   }
 
-  async function configureTSConfig(workspacePath: Workspaces.WorkspacePath) {
+  export async function configureTSConfig(
+    workspacePath: Workspaces.WorkspacePath,
+    silent?: boolean
+  ) {
     return mutateTSConfig(getTSConfigPath(workspacePath), (tsConfig) => {
       const result = mutateConfigureWorkspaceTSConfig(tsConfig);
 
-      if (result !== false)
+      if (!silent && result !== false)
         Utils.log(
           `Configured ${green(
             Workspaces.getWorkspaceName(workspacePath)
@@ -262,7 +278,10 @@ export namespace TSConfig {
     });
   }
 
-  export function configureRoot(workspacePaths: Set<Workspaces.WorkspacePath>) {
+  export function configureRoot(
+    workspacePaths: Set<Workspaces.WorkspacePath>,
+    silent?: boolean
+  ) {
     return mutateTSConfig(
       getTSConfigPath(),
       (tsConfig, fromDisk) => {
@@ -276,7 +295,7 @@ export namespace TSConfig {
         tsConfig.files = [];
         tsConfig.references = references;
 
-        Utils.log("Configured the root tsconfig.json");
+        if (!silent) Utils.log("Configured the root tsconfig.json");
       },
       () => Utils.cloneDeepJSON(defaultRootTSConfig)
     );

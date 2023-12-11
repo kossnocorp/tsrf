@@ -5,8 +5,12 @@ import { State } from "./state.js";
 import { TSConfig } from "./tsconfig.js";
 import { Utils } from "./utils.js";
 import { Workspaces } from "./workspaces.js";
+import { rmdir, writeFile } from "fs/promises";
+import { format } from "prettier";
+import { basename } from "path";
 
-const { green, gray, blue, bold, red, yellow, cyan, italic } = picocolors;
+const { green, gray, blue, bold, red, yellow, cyan, magenta, italic } =
+  picocolors;
 
 /// Main
 
@@ -84,6 +88,28 @@ async function checkWorkspacesWithRootTSConfig(rootPackage: Package.Package) {
     Utils.print("\n");
   });
 
+  if (fix && reports.some((report) => !report.name && !report.redundant)) {
+    Utils.error(
+      "Failed to update package.json names, please fix the issues manually"
+    );
+    process.exit(1);
+  }
+
+  const duplicates = findNameDuplicates(reports);
+  if (duplicates.size) {
+    Utils.error(
+      `Found workspaces with the same name, please fix the issues manually:\n\n${Array.from(
+        duplicates
+      )
+        .map(
+          ([name, paths]) =>
+            `    ● ${green(name)}: ${gray(Array.from(paths).join(", "))}`
+        )
+        .join("\n")}`
+    );
+    process.exit(1);
+  }
+
   const rootReport = await checkRootTSConfig(workspacePaths);
 
   Utils.print(`${blue("Project root")}:\n`);
@@ -102,9 +128,9 @@ async function checkWorkspacesWithRootTSConfig(rootPackage: Package.Package) {
     );
   }
 
-  const anyIssues = reports.some((report) =>
-    report.checks.some((check) => check.status === "fail")
-  );
+  const anyIssues = [rootReport]
+    .concat(reports)
+    .some((report) => report.checks.some((check) => check.status === "fail"));
 
   if (!fix && anyIssues) {
     Utils.log(
@@ -120,11 +146,22 @@ async function checkWorkspacesWithRootTSConfig(rootPackage: Package.Package) {
     );
   }
 
-  if (rootReport && !redundantWorkspaces.length && !anyIssues) {
+  if (!fix && !anyIssues) {
     Utils.log(
       `${green(
         "►"
       )} Everything is OK! You can start the watch mode now:\n\n    ${cyan(
+        "npx tsrf"
+      )}`
+    );
+    process.exit(0);
+  }
+
+  if (fix) {
+    Utils.log(
+      `${green(
+        "►"
+      )} Everything is fixed! You can start the watch mode now:\n\n    ${cyan(
         "npx tsrf"
       )}`
     );
@@ -148,14 +185,6 @@ async function checkWorkspace(
   const packagePath = Package.getWorkspacePackagePath(workspacePath);
   const pkg = await Package.readPackage(packagePath).catch(() => {});
 
-  if (pkg) okCheck(report, "package.json");
-  else failCheck(report, `package.json not found or it's invalid`);
-
-  if (pkg && !pkg.name)
-    failCheck(report, `name in package.json is empty or missing`);
-
-  report.name = pkg?.name;
-
   const tsConfigPath = TSConfig.getTSConfigPath(workspacePath);
   const tsConfig = await TSConfig.readTSConfig(tsConfigPath).catch(() => {});
 
@@ -163,18 +192,52 @@ async function checkWorkspace(
     ignore: globIgnore,
   });
 
-  if (!tsFiles.length) {
-    if (!pkg) {
-      const anyFiles = await glob(`${workspacePath}/**/*`, {
-        ignore: globIgnore,
-      });
+  // First check when tsconfig.json is missing if the workspace is empty
+  if (!tsConfig) {
+    if (!tsFiles.length) {
+      if (!pkg) {
+        const anyFiles = await glob(`${workspacePath}/**/*`, {
+          ignore: globIgnore,
+        });
 
-      if (!anyFiles.length) {
-        report.redundant = true;
-        return report;
+        if (!anyFiles.length) {
+          if (fix && doDelete) {
+            await rmdir(workspacePath, { recursive: true });
+            fixedCheck(report, `removed empty workspace`);
+          } else {
+            report.redundant = true;
+          }
+
+          return report;
+        }
       }
     }
+  }
 
+  if (pkg) okCheck(report, "package.json");
+  else {
+    if (fix) {
+      const name = (report.name = generateWorkspaceName(workspacePath));
+      await writeJSON(packagePath, { name });
+      fixedCheck(report, `created package.json with name ${name}`);
+    } else {
+      failCheck(report, `package.json not found or it's invalid`);
+    }
+  }
+
+  if (pkg && !pkg.name) {
+    if (fix) {
+      const name = (report.name = generateWorkspaceName(workspacePath));
+      await writeJSON(packagePath, { ...pkg, name });
+      fixedCheck(report, `set package.json name to ${name}`);
+    } else {
+      failCheck(report, `name in package.json is empty or missing`);
+    }
+  }
+
+  report.name = report.name || pkg?.name;
+
+  if (!tsFiles.length) {
     if (tsConfig)
       infoCheck(report, "no TS files found, but tsconfig.json exists");
     else infoCheck(report, `no TS files found`);
@@ -183,7 +246,13 @@ async function checkWorkspace(
   }
 
   if (!tsConfig) {
-    failCheck(report, `tsconfig.json not found or it's invalid`);
+    if (fix) {
+      const jsx = tsFiles.some((file) => file.endsWith(".tsx"));
+      await writeJSON(tsConfigPath, TSConfig.defaultTSConfig(jsx));
+      fixedCheck(report, `created tsconfig.json`);
+    } else {
+      failCheck(report, `tsconfig.json not found or it's invalid`);
+    }
     return report;
   }
 
@@ -193,7 +262,12 @@ async function checkWorkspace(
       TSConfig.defaultTSConfigCompilerOptions
     )
   ) {
-    failCheck(report, `tsconfig.json needs to be configured`);
+    if (fix) {
+      await TSConfig.configureTSConfig(workspacePath, true);
+      fixedCheck(report, `configured tsconfig.json`);
+    } else {
+      failCheck(report, `tsconfig.json needs to be configured`);
+    }
     return report;
   }
 
@@ -214,13 +288,23 @@ async function checkRootTSConfig(
   );
 
   if (!tsConfig) {
-    failCheck(report, "tsconfig.json not found or it's invalid");
+    if (fix) {
+      await writeJSON(State.rootTSConfigPath, TSConfig.defaultRootTSConfig);
+      fixedCheck(report, "created tsconfig.json");
+    } else {
+      failCheck(report, "tsconfig.json not found or it's invalid");
+    }
     return report;
   }
   const references = TSConfig.referencesFromWorkspacePaths(workspacePaths);
 
   if (!TSConfig.isRootTSConfigSatisfactory(tsConfig, references)) {
-    failCheck(report, "tsconfig.json needs to be configured");
+    if (fix) {
+      await TSConfig.configureRoot(workspacePaths, true);
+      fixedCheck(report, "configured tsconfig.json");
+    } else {
+      failCheck(report, "tsconfig.json needs to be configured");
+    }
     return report;
   }
 
@@ -243,6 +327,10 @@ function infoCheck(report: Report, message: string) {
   report.checks.push({ status: "info", message });
 }
 
+function fixedCheck(report: Report, message: string) {
+  report.checks.push({ status: "fixed", message });
+}
+
 function printCheck(check: Check) {
   Utils.print(
     `    ${printBullet(check.status)} ${check.message}: ${printStatus(
@@ -259,6 +347,8 @@ function printStatus(status: CheckStatus): string {
       return yellow("OK");
     case "fail":
       return bold(red("FAIL"));
+    case "fixed":
+      return bold(magenta("FIXED"));
   }
 }
 
@@ -270,7 +360,54 @@ function printBullet(status: CheckStatus): string {
       return yellow("●");
     case "fail":
       return red("●");
+    case "fixed":
+      return magenta("●");
   }
+}
+
+async function writeJSON(
+  path: Package.PackagePath,
+  config: Package.Package
+): Promise<void>;
+
+async function writeJSON(
+  path: TSConfig.TSConfigPath,
+  config: TSConfig.TSConfig
+): Promise<void>;
+
+async function writeJSON(path: string, config: any) {
+  const content = await formatJSON(config);
+  return writeFile(path, content);
+}
+
+function formatJSON(config: Package.Package | TSConfig.TSConfig) {
+  return format(JSON.stringify(config), { parser: "json" });
+}
+
+function generateWorkspaceName(workspacePath: Workspaces.WorkspacePath) {
+  return basename(workspacePath) as Workspaces.WorkspaceName;
+}
+
+function findNameDuplicates(reports: WorkspaceReport[]) {
+  const map = new Map<
+    Workspaces.WorkspaceName,
+    Set<Workspaces.WorkspacePath>
+  >();
+
+  for (const report of reports) {
+    if (!report.name) continue;
+
+    const reportMap = map.get(report.name) || new Set();
+    reportMap.add(report.path);
+
+    map.set(report.name, reportMap);
+  }
+
+  for (const [name, paths] of map) {
+    if (paths.size === 1) map.delete(name);
+  }
+
+  return map;
 }
 
 /// Types
@@ -290,4 +427,4 @@ interface Check {
   message: string;
 }
 
-type CheckStatus = "ok" | "fail" | "info";
+type CheckStatus = "ok" | "fail" | "info" | "fixed";
