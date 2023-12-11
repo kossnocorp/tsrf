@@ -28,6 +28,7 @@ export async function watch() {
 /// CLI
 
 const showRedundant = !!process.argv.find((arg) => arg === "--redundant");
+const logFS = !!process.argv.find((arg) => arg === "--fs");
 
 /// Processes managment
 
@@ -75,6 +76,8 @@ function startWatcher() {
     }
 
     events.forEach((event) => {
+      if (logFS) Utils.debug(`Watch event: ${gray(JSON.stringify(event))}`);
+
       const path = relative(State.root, event.path);
 
       switch (true) {
@@ -149,21 +152,17 @@ function processBuildInfoWatchEvent(
 //// Watchlists management
 
 function watchWorkspacePackage(workspacePath: Workspaces.WorkspacePath) {
-  Utils.debug("Watching workspace", workspacePath);
+  Utils.debug(`Watching ${green(workspacePath)} package`);
   const packagePath = Package.getWorkspacePackagePath(workspacePath);
   State.workspacePackagesWatchlist.add(packagePath);
   return processWorkspacePackageCreate(packagePath);
-  // TODO: Get rid of it?!
-  // return stat(packagePath)
-  //   .catch(() => {})
-  //   .then((stats) => stats && processWorkspacePackageCreate(packagePath));
 }
 
 async function watchBuildInfo(workspacePath: Workspaces.WorkspacePath) {
   const buildInfoPath = BuildInfo.getBuildInfoPath(workspacePath);
   if (State.buildInfoWatchlist.has(buildInfoPath)) return;
 
-  Utils.debug("Watching build info", workspacePath, buildInfoPath);
+  Utils.debug(`Watching ${blue(buildInfoPath)}`);
 
   // Add to the watchlist
   State.buildInfoWatchlist.add(buildInfoPath);
@@ -189,7 +188,12 @@ async function processRootPackageAdd() {
 }
 
 async function processRootPackageCreate(argPackage?: Package.Package) {
-  Utils.debug("Detected package.json create, initializing processing");
+  Utils.debug(
+    `Detected root ${blue("package.json")} create, initializing processing`
+  );
+
+  // We're watching!
+  State.watch();
 
   // Use already read package.json if provided or read it
   const rootPackage =
@@ -197,7 +201,9 @@ async function processRootPackageCreate(argPackage?: Package.Package) {
 
   // Find all workspaces on the filesystem using the package globs
   const workspacePaths = await Workspaces.workspacesFromPackage(rootPackage);
-  Utils.debug("Found workspaces", workspacePaths);
+  Utils.debug(`Found workspaces:
+
+    ${gray(JSON.stringify(Array.from(workspacePaths)))}`);
 
   // Before doing anything, we need to parse packages, save which workspaces
   // have missing package.json and store the workspace names, so they are
@@ -212,7 +218,9 @@ async function processRootPackageCreate(argPackage?: Package.Package) {
   // watching the rest.
   const matchingWorkspacePaths = Workspaces.matchingWorkspaces(workspacePaths);
 
-  Utils.debug("Mathcing workspaces", matchingWorkspacePaths);
+  Utils.debug(`Mathcing workspaces:
+
+    ${gray(JSON.stringify(Array.from(matchingWorkspacePaths)))}`);
 
   // Update the workspace tsconfig.json files with proper config if necessary
   await TSConfig.configureTSConfigs(matchingWorkspacePaths);
@@ -226,7 +234,9 @@ async function processRootPackageCreate(argPackage?: Package.Package) {
 }
 
 async function processRootPackageChange() {
-  Utils.debug("Detected package.json change, updating watchlist");
+  Utils.debug(
+    `Detected root ${blue("package.json")}  change, updating watchlist`
+  );
 
   // Unpause the processing if paused
   State.watch();
@@ -236,7 +246,9 @@ async function processRootPackageChange() {
 
   // Find all workspaces on the filesystem using the package globs
   const workspacePaths = await Workspaces.workspacesFromPackage(rootPackage);
-  Utils.debug("Found workspaces", workspacePaths);
+  Utils.debug(`Found workspaces:
+
+    ${gray(JSON.stringify(Array.from(workspacePaths)))}`);
 
   // Now check if the workspaces list has changed
   const watchedWorkspaces = Workspaces.getWatchedWorkspacePaths();
@@ -314,10 +326,7 @@ async function processWorkspacePackageWrite(
   packagePath: Package.PackagePath,
   create?: boolean
 ) {
-  Utils.debug(
-    `Detected workspace package.json ${create ? "create" : "update"}`,
-    packagePath
-  );
+  Utils.debug(`Detected ${green(packagePath)} ${create ? "create" : "update"}`);
 
   // Get the workspace path
   const workspacePath = Package.packagePathToWorkspacePath(packagePath);
@@ -335,7 +344,11 @@ async function processWorkspacePackageWrite(
   const dependencies = Package.getPackageDependencies(pkg);
   // Extract the name
   const workspaceName = pkg.name;
-  Utils.debug("Found workspace dependencies", workspaceName, dependencies);
+  Utils.debug(
+    `Found ${green(workspaceName)} dependencies:
+
+    ${gray(JSON.stringify(dependencies))}`
+  );
 
   if (workspaceName) {
     // Assign the workspace name
@@ -401,7 +414,9 @@ async function processBuildInfoWrite(
   buildInfoPath: BuildInfo.BuildInfoPath,
   create?: boolean
 ) {
-  Utils.debug(`Detected build ${create ? "create" : "update"}`, buildInfoPath);
+  Utils.debug(
+    `Detected ${blue(buildInfoPath)} ${create ? "create" : "update"}`
+  );
 
   const workspacePath = BuildInfo.buildInfoPathToWorkspacePath(buildInfoPath);
   const workspaceName = Workspaces.getWorkspaceName(workspacePath);
@@ -428,7 +443,11 @@ async function processBuildInfoWrite(
     return;
   }
 
-  Utils.debug("Found build info dependencies", buildInfoPath, buildInfoDeps);
+  Utils.debug(
+    `Found ${green(workspaceName)} build info dependencies:
+
+    ${gray(JSON.stringify(buildInfoDeps))}`
+  );
 
   const workspaceDeps = Workspaces.getWorkspaceDependencies(workspaceName);
   const missing = Utils.getMissingItems(workspaceDeps, buildInfoDeps);

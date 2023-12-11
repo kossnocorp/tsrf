@@ -14,7 +14,7 @@ export namespace Utils {
   /// Functions
 
   export function debug(...message: any[]) {
-    if (verbose) console.debug(...message);
+    if (verbose) console.debug(...message, "\n");
   }
 
   export const debouncedLog = debounceByArgs(log, 50);

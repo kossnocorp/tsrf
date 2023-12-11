@@ -8,7 +8,7 @@ import { Config } from "./config.js";
 import { Utils } from "./utils.js";
 import { Workspaces } from "./workspaces.js";
 
-const { green } = picocolors;
+const { green, gray, blue } = picocolors;
 
 export namespace TSConfig {
   /// Types
@@ -338,10 +338,12 @@ export namespace TSConfig {
   ) {
     const prevTSConfig = Utils.cloneDeepJSON(tsConfig);
     const tsConfigReferences = tsConfig?.references || [];
+    const workspaceName = Workspaces.getWorkspaceName(workspacePath);
 
-    Utils.debug("References update!");
-    Utils.debug("Actual references:", tsConfigReferences);
-    Utils.debug("The tsconfig.tsbuildinfo references:", references);
+    Utils.debug(`Checking ${green(workspaceName)} references for update...
+
+    Current:  ${gray(JSON.stringify(tsConfigReferences))}
+    Reported: ${gray(JSON.stringify(references))}`);
 
     tsConfig.references = references;
 
@@ -354,14 +356,25 @@ export namespace TSConfig {
     mutateRemoveRedundantAliases(tsConfig, redundantRefs);
     mutateAddMissingAliases(tsConfig, missingRefs, workspacePath);
 
-    if (Utils.deepEqualJSON(prevTSConfig, tsConfig)) return false;
+    if (Utils.deepEqualJSON(prevTSConfig, tsConfig)) {
+      Utils.debug(
+        `    No need to update ${workspaceName} ${blue("tsconfig.json")}`
+      );
+
+      return false;
+    }
+
+    Utils.debug(
+      `    New ${green(workspaceName)} references: ${gray(
+        references.map(({ path }) => path).join(", ")
+      )}`
+    );
 
     Utils.log(
-      `Writing ${green(
-        Workspaces.getWorkspaceName(workspacePath)
-      )} tsconfig.json with updated references list`
+      `Writing ${green(workspaceName)} ${blue(
+        "tsconfig.json"
+      )} with updated references list`
     );
-    Utils.debug("References:", references);
   }
 
   function mutateRemoveRedundantAliases(
@@ -406,7 +419,10 @@ export namespace TSConfig {
     }
   }
 
-  function areReferencesEqual(a: TSConfigReference[], b: TSConfigReference[]) {
+  export function areReferencesEqual(
+    a: TSConfigReference[],
+    b: TSConfigReference[]
+  ) {
     return Utils.areEqual(
       a.map(pathFromReference).sort(),
       b.map(pathFromReference).sort()
