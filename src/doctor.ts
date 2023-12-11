@@ -6,11 +6,18 @@ import { TSConfig } from "./tsconfig.js";
 import { Utils } from "./utils.js";
 import { Workspaces } from "./workspaces.js";
 
-const { green, gray, blue, bold, red, yellow } = picocolors;
+const { green, gray, blue, bold, red, yellow, cyan, italic } = picocolors;
 
 /// Main
 
 export async function doctor() {
+  Utils.print("");
+  Utils.log(
+    italic(
+      "tsrf doctor checks if the project is configured correctly and ready to be used with TypeScript Project References. It checks each workspace and the root project. In case of any issues, it prints them and exits with code 1."
+    )
+  );
+
   const rootPackage = await checkRootPackage();
   await checkWorkspacesWithRootTSConfig(rootPackage);
 }
@@ -18,6 +25,7 @@ export async function doctor() {
 /// CLI
 
 const fix = !!process.argv.find((arg) => arg === "--fix");
+const doDelete = !!process.argv.find((arg) => arg === "--delete");
 
 /// Checks
 
@@ -62,8 +70,8 @@ async function checkWorkspacesWithRootTSConfig(rootPackage: Package.Package) {
 
     if (report.redundant) {
       Utils.print(
-        `    ${yellow(
-          "●"
+        `    ${printBullet(
+          "info"
         )} The workspace is empty, consider removing it: ${gray(
           `rm -rf ${report.path}\n`
         )}`
@@ -71,12 +79,15 @@ async function checkWorkspacesWithRootTSConfig(rootPackage: Package.Package) {
       return;
     }
 
-    report.checks.forEach((check) => printCheck(check.status, check.message));
+    report.checks.forEach(printCheck);
 
     Utils.print("\n");
   });
 
-  const rootOk = await checkRootTSConfig(workspacePaths);
+  const rootReport = await checkRootTSConfig(workspacePaths);
+
+  Utils.print(`${blue("Project root")}:\n`);
+  rootReport.checks.forEach(printCheck);
   Utils.print("\n");
 
   const redundantWorkspaces = reports.filter((report) => report.redundant);
@@ -97,41 +108,51 @@ async function checkWorkspacesWithRootTSConfig(rootPackage: Package.Package) {
 
   if (!fix && anyIssues) {
     Utils.log(
-      `${red("►")} To automatically fix the failing issues, run:\n\n    ${gray(
+      `${red("►")} To automatically fix the failing issues, run:\n\n    ${cyan(
         `npx tsrf doctor --fix`
-      )}`
+      )}${
+        redundantWorkspaces.length
+          ? `\n\n...you can also add --delete to remove redundant workspaces:\n\n    ${gray(
+              `npx tsrf doctor --fix --delete`
+            )}`
+          : ""
+      }`
     );
   }
 
-  if (rootOk && !redundantWorkspaces.length && !anyIssues) {
-    Utils.log(`${green("►")} All is OK!`);
+  if (rootReport && !redundantWorkspaces.length && !anyIssues) {
+    Utils.log(
+      `${green(
+        "►"
+      )} Everything is OK! You can start the watch mode now:\n\n    ${cyan(
+        "npx tsrf"
+      )}`
+    );
+    process.exit(0);
   }
+
+  process.exit(1);
 }
 
 const globIgnore = ["**/node_modules/**", "**/.ts/**"];
 
 async function checkWorkspace(
   workspacePath: Workspaces.WorkspacePath
-): Promise<Report> {
-  const report: Report = {
+): Promise<WorkspaceReport> {
+  const report: WorkspaceReport = {
     name: undefined,
     path: workspacePath,
     checks: [],
   };
 
-  const ok = (message: string) => report.checks.push({ status: "ok", message });
-  const fail = (message: string) =>
-    report.checks.push({ status: "fail", message });
-  const info = (message: string) =>
-    report.checks.push({ status: "info", message });
-
   const packagePath = Package.getWorkspacePackagePath(workspacePath);
   const pkg = await Package.readPackage(packagePath).catch(() => {});
 
-  if (pkg) ok("package.json");
-  else fail(`package.json not found or it's invalid`);
+  if (pkg) okCheck(report, "package.json");
+  else failCheck(report, `package.json not found or it's invalid`);
 
-  if (pkg && !pkg.name) fail(`name in package.json is empty or missing`);
+  if (pkg && !pkg.name)
+    failCheck(report, `name in package.json is empty or missing`);
 
   report.name = pkg?.name;
 
@@ -154,14 +175,15 @@ async function checkWorkspace(
       }
     }
 
-    if (tsConfig) info("no TS files found, but tsconfig.json exists");
-    else info(`no TS files found`);
+    if (tsConfig)
+      infoCheck(report, "no TS files found, but tsconfig.json exists");
+    else infoCheck(report, `no TS files found`);
 
     return report;
   }
 
   if (!tsConfig) {
-    fail(`tsconfig.json not found or it's invalid`);
+    failCheck(report, `tsconfig.json not found or it's invalid`);
     return report;
   }
 
@@ -171,78 +193,101 @@ async function checkWorkspace(
       TSConfig.defaultTSConfigCompilerOptions
     )
   ) {
-    fail(`tsconfig.json needs to be configured`);
+    failCheck(report, `tsconfig.json needs to be configured`);
     return report;
   }
 
-  ok(`tsconfig.json`);
+  okCheck(report, `tsconfig.json`);
 
   return report;
 }
 
 async function checkRootTSConfig(
   workspacePaths: Set<Workspaces.WorkspacePath>
-): Promise<boolean> {
-  Utils.print(`${blue("Project root")}:\n`);
+): Promise<Report> {
+  const report: Report = { checks: [] };
 
-  printCheck("ok", "package.json");
+  okCheck(report, "package.json");
 
   const tsConfig = await TSConfig.readTSConfig(State.rootTSConfigPath).catch(
     () => {}
   );
 
   if (!tsConfig) {
-    printCheck("fail", "tsconfig.json not found or it's invalid");
-    return false;
+    failCheck(report, "tsconfig.json not found or it's invalid");
+    return report;
   }
   const references = TSConfig.referencesFromWorkspacePaths(workspacePaths);
 
   if (!TSConfig.isRootTSConfigSatisfactory(tsConfig, references)) {
-    printCheck("fail", "tsconfig.json needs to be configured");
-    return false;
+    failCheck(report, "tsconfig.json needs to be configured");
+    return report;
   }
 
-  printCheck("ok", "tsconfig.json");
+  okCheck(report, "tsconfig.json");
 
-  return true;
+  return report;
 }
 
 /// Utils
 
-function printCheck(status: CheckStatus, message: string) {
-  const statusStr =
-    status === "ok"
-      ? green("OK")
-      : status === "info"
-        ? yellow("OK")
-        : bold(red("FAIL"));
+function okCheck(report: Report, message: string) {
+  report.checks.push({ status: "ok", message });
+}
 
-  const bullet =
-    status === "ok" ? green("○") : status === "info" ? yellow("●") : red("●");
+function failCheck(report: Report, message: string) {
+  report.checks.push({ status: "fail", message });
+}
 
-  Utils.print(`    ${bullet} ${message}: ${statusStr}`);
+function infoCheck(report: Report, message: string) {
+  report.checks.push({ status: "info", message });
+}
+
+function printCheck(check: Check) {
+  Utils.print(
+    `    ${printBullet(check.status)} ${check.message}: ${printStatus(
+      check.status
+    )}`
+  );
+}
+
+function printStatus(status: CheckStatus): string {
+  switch (status) {
+    case "ok":
+      return green("OK");
+    case "info":
+      return yellow("OK");
+    case "fail":
+      return bold(red("FAIL"));
+  }
+}
+
+function printBullet(status: CheckStatus): string {
+  switch (status) {
+    case "ok":
+      return green("○");
+    case "info":
+      return yellow("●");
+    case "fail":
+      return red("●");
+  }
 }
 
 /// Types
 
-type CheckStatus = "ok" | "fail" | "info";
-
 interface Report {
+  checks: Check[];
+}
+
+interface WorkspaceReport extends Report {
   name: Workspaces.WorkspaceName | undefined;
   path: Workspaces.WorkspacePath;
-  checks: ReportCheck[];
   redundant?: boolean;
 }
 
-type ReportCheck = ReportCheckOk | ReportCheckFail;
-
-interface ReportCheckOk {
-  status: "ok" | "info";
+interface Check {
+  status: CheckStatus;
   message: string;
 }
 
-interface ReportCheckFail {
-  status: "fail";
-  message: string;
-  fix?: () => {};
-}
+type CheckStatus = "ok" | "fail" | "info";
