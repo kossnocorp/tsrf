@@ -386,7 +386,7 @@ async function writeJSON(path: string, config: any) {
 }
 
 function formatJSON(config: Package.Package | TSConfig.TSConfig) {
-  return format(JSON.stringify(config), { parser: "json" });
+  return format(JSON.stringify(config, null, 2), { parser: "json" });
 }
 
 function generateWorkspaceName(

@@ -5,6 +5,9 @@ import { OpaqueString } from "typeroo/string/index.js";
 import { Workspaces } from "./workspaces.js";
 import { Utils } from "./utils.js";
 import { State } from "./state.js";
+import picocolors from "picocolors";
+
+const { green, gray, blue } = picocolors;
 
 export namespace BuildInfo {
   /// Types

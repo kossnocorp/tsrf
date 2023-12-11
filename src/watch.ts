@@ -27,7 +27,6 @@ export async function watch() {
 
 /// CLI
 
-const showRedundant = !!process.argv.find((arg) => arg === "--redundant");
 const logFS = !!process.argv.find((arg) => arg === "--fs");
 
 /// Processes managment
@@ -228,9 +227,7 @@ async function processRootPackageCreate(argPackage?: Package.Package) {
   // Setup the root config from workspaces if necessary
   await TSConfig.configureRoot(matchingWorkspacePaths);
 
-  return Promise.all(
-    Array.from(matchingWorkspacePaths).map(watchWorkspacePackage)
-  );
+  return Promise.all(Array.from(workspacePaths).map(watchWorkspacePackage));
 }
 
 async function processRootPackageChange() {
@@ -390,8 +387,9 @@ async function processWorkspacePackageWrite(
     );
   }
 
-  // Ensure the we're watching the buildinfo:
-  return watchBuildInfo(workspacePath);
+  // Ensure the we're watching the buildinfo, if tsconfig is there
+  if (Workspaces.hasRequirement(workspacePath, Workspaces.Requirement.TSConfig))
+    return watchBuildInfo(workspacePath);
 }
 
 async function processWorkspacePackageDelete(packagePath: Package.PackagePath) {
@@ -453,32 +451,8 @@ async function processBuildInfoWrite(
   const missing = Utils.getMissingItems(workspaceDeps, buildInfoDeps);
   const redundant = Utils.getRedundantItems(workspaceDeps, buildInfoDeps);
 
-  // If the CLI arg is set, show the redundant dependencies
-  if (showRedundant && redundant.length) {
-    const command = `npm uninstall -w ${workspaceName} ${redundant
-      .map((name) => name + "@*")
-      .join(" ")}`;
-
-    if (!State.commandsReported.has(command)) {
-      State.commandsReported.add(command);
-
-      Utils.warn(
-        `Detected redundant dependencies in ${green(
-          workspaceName
-        )} package.json:`,
-        gray(redundant.join(", "))
-      );
-
-      Utils.log(
-        `${gray("Please run")}:
-    
-    ${blue(command)}`
-      );
-    }
-  }
-
   // If there are missing dependencies, write to the log with debounce
-  if (missing.length)
+  if (missing.length || redundant.length)
     Utils.debouncedLog(
       `Dependencies changed, run the command to update package-lock.json:
 
@@ -489,8 +463,9 @@ async function processBuildInfoWrite(
   State.workspaceDependencies.set(workspaceName, buildInfoDeps);
 
   return Promise.all([
-    // Add missing dependencies to the package.json
-    missing.length && Package.addMissingDependencies(workspacePath, missing),
+    // Update dependencies in the package.json
+    (missing.length || redundant.length) &&
+      Package.updateChangedDependencies(workspacePath, { missing, redundant }),
 
     // Update the references in the tsconfig.json
     TSConfig.updateReferences(workspacePath, buildInfoDeps),

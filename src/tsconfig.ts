@@ -90,7 +90,7 @@ export namespace TSConfig {
     referencePath: TSConfigReferencePath
   ) {
     return Object.entries(aliases).find(([_, paths]) =>
-      paths.includes(referencePath as unknown as TSConfigAliasResolve)
+      paths.includes(referencePathToAliasResolve(referencePath))
     )?.[0] as TSConfigAlias | undefined;
   }
 
@@ -173,7 +173,9 @@ export namespace TSConfig {
       : mutatorResult === false;
     if (skipWrite) return;
 
-    const content = await format(JSON.stringify(tsConfig), { parser: "json" });
+    const content = await format(JSON.stringify(tsConfig, null, 2), {
+      parser: "json",
+    });
     await writeFile(tsConfigPath, content);
   }
 
@@ -347,14 +349,16 @@ export namespace TSConfig {
 
     tsConfig.references = references;
 
-    const redundantRefs = Utils.getRedundantItems(
+    const redundantRefs = getRedundantReferences(
       tsConfigReferences,
       references
     );
-    const missingRefs = Utils.getMissingItems(tsConfigReferences, references);
+    const missingRefs = getMissingReferences(tsConfigReferences, references);
 
-    mutateRemoveRedundantAliases(tsConfig, redundantRefs);
-    mutateAddMissingAliases(tsConfig, missingRefs, workspacePath);
+    redundantRefs.length &&
+      mutateRemoveRedundantAliases(tsConfig, redundantRefs);
+    missingRefs.length &&
+      mutateAddMissingAliases(tsConfig, missingRefs, workspacePath);
 
     if (Utils.deepEqualJSON(prevTSConfig, tsConfig)) {
       Utils.debug(
@@ -375,6 +379,20 @@ export namespace TSConfig {
         "tsconfig.json"
       )} with updated references list`
     );
+  }
+
+  function getRedundantReferences(
+    actual: TSConfig.TSConfigReference[],
+    next: TSConfig.TSConfigReference[]
+  ) {
+    return actual.filter((item) => !next.some((i) => i.path === item.path));
+  }
+
+  function getMissingReferences(
+    actual: TSConfig.TSConfigReference[],
+    next: TSConfig.TSConfigReference[]
+  ) {
+    return next.filter((item) => !actual.some((i) => i.path === item.path));
   }
 
   function mutateRemoveRedundantAliases(

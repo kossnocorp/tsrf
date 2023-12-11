@@ -127,13 +127,20 @@ export namespace Package {
       : mutatorResult === false;
     if (skipWrite) return;
 
-    const content = await format(JSON.stringify(pkg), { parser: "json" });
+    const content = await format(JSON.stringify(pkg, null, 2), {
+      parser: "json",
+    });
     await writeFile(packagePath, content);
   }
 
-  export function addMissingDependencies(
+  export interface AddMissingDependenciesProps {
+    missing: Workspaces.WorkspaceName[];
+    redundant: Workspaces.WorkspaceName[];
+  }
+
+  export function updateChangedDependencies(
     workspacePath: Workspaces.WorkspacePath,
-    missingDeps: Workspaces.WorkspaceName[]
+    { missing, redundant }: AddMissingDependenciesProps
   ) {
     return mutatePackage(getWorkspacePackagePath(workspacePath), (pkg) => {
       Utils.log(
@@ -141,12 +148,23 @@ export namespace Package {
           Workspaces.getWorkspaceName(workspacePath)
         )}, updating package.json`
       );
+
       pkg.dependencies = pkg.dependencies || {};
-      missingDeps.reduce((deps, name) => {
+
+      missing.reduce((deps, name) => {
         deps[name] = "*";
         return deps;
       }, pkg.dependencies);
+
+      redundant.forEach((name) => {
+        delete pkg.dependencies?.[name];
+        delete pkg.devDependencies?.[name];
+      });
+
       pkg.dependencies = Utils.sortObject(pkg.dependencies);
+
+      if (pkg.devDependencies)
+        pkg.devDependencies = Utils.sortObject(pkg.devDependencies);
     });
   }
 }
