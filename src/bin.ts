@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 /// CLI
 
 import { doctor } from "./doctor.js";

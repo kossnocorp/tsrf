@@ -7,7 +7,7 @@ import { format } from "prettier";
 import picocolors from "picocolors";
 import { State } from "./state.js";
 
-const { green } = picocolors;
+const { green, blue } = picocolors;
 
 export namespace Package {
   /// Types
@@ -144,9 +144,9 @@ export namespace Package {
   ) {
     return mutatePackage(getWorkspacePackagePath(workspacePath), (pkg) => {
       Utils.log(
-        `Detected missing dependencies in ${green(
-          Workspaces.getWorkspaceName(workspacePath)
-        )}, updating package.json`
+        `The ${green(Workspaces.getWorkspaceName(workspacePath))} ${blue(
+          "package.json"
+        )} dependencies changed, writing`
       );
 
       pkg.dependencies = pkg.dependencies || {};

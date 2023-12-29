@@ -8,6 +8,6 @@ This change log follows the format documented in [Keep a CHANGELOG].
 [semantic versioning]: http://semver.org/
 [keep a changelog]: http://keepachangelog.com/
 
-## v0.1.0 - 2023-12-??
+## v0.1.1 - 2023-12-11
 
-Coming soon
+Initial version

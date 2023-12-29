@@ -22,6 +22,9 @@ export namespace State {
     number
   >();
   export const watching: Ref<boolean> = { current: false };
+  // We start paused false, so when we put on pause and unpause when know that
+  // it's the initial call.
+  export const paused: Ref<boolean> = { current: false };
 
   // Links
   export const workspaceNames = new Map<
@@ -45,10 +48,12 @@ export namespace State {
 
   export function watch() {
     watching.current = true;
+    paused.current = false;
   }
 
   export function pause() {
     watching.current = false;
+    paused.current = true;
     clear();
   }
 

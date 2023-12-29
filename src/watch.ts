@@ -176,10 +176,14 @@ async function watchBuildInfo(workspacePath: Workspaces.WorkspacePath) {
 
 async function processRootPackageAdd() {
   const rootPackage = await Package.readPackage(State.rootPackagePath).catch(
-    () =>
+    () => {
       Utils.warn(
-        "package.json not found, make sure you are in the root directory. The processing will begine once the file is created."
-      )
+        `The root ${blue(
+          "package.json"
+        )} not found, make sure you are in the root directory. The processing will begine once the file is created.`
+      );
+      State.paused.current = true;
+    }
   );
   if (!rootPackage) return;
 
@@ -190,6 +194,12 @@ async function processRootPackageCreate(argPackage?: Package.Package) {
   Utils.debug(
     `Detected root ${blue("package.json")} create, initializing processing`
   );
+
+  // We already been there and paused
+  if (State.paused.current)
+    Utils.log(
+      `The root ${blue("package.json")} has been created, resuming processing`
+    );
 
   // We're watching!
   State.watch();
@@ -305,7 +315,9 @@ async function processRootPackageChange() {
 }
 
 async function processRootPackageDelete() {
-  Utils.warn("package.json has been deleted, pausing processing");
+  Utils.warn(
+    `The root ${blue("package.json")} has been deleted, pausing processing`
+  );
   State.pause();
 }
 

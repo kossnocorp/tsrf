@@ -1,10 +1,10 @@
 {
   "name": "tsrf",
-  "version": "0.0.0",
+  "version": "0.1.1",
   "description": "Build tool that marries npm workspaces with TypeScript references",
   "main": "index.js",
   "bin": {
-    "tsrf": "./bin.js"
+    "tsrf": "bin.js"
   },
   "type": "module",
   "scripts": {

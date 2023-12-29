@@ -68,9 +68,8 @@ export namespace TSConfig {
             Workspaces.Requirement.TSConfig
           );
 
-        Utils.warn(
-          `Workspace tsconfig.json not found, ignoring ${green(workspacePath)}`,
-          workspacePath
+        Utils.debug(
+          `Workspace tsconfig.json not found, ignoring ${green(workspacePath)}`
         );
 
         Workspaces.removeRequirement(
@@ -375,9 +374,9 @@ export namespace TSConfig {
     );
 
     Utils.log(
-      `Writing ${green(workspaceName)} ${blue(
+      `The ${green(workspaceName)} ${blue(
         "tsconfig.json"
-      )} with updated references list`
+      )} references has changed, writing`
     );
   }
 
