@@ -16,9 +16,9 @@ Type-checking in a monorepo was always a compromise:
 
 2. Or you give up on accuracy and use a single `tsconfig.json` but open doors for bugs and incompatibility between modules.
 
-3. Or you use [TypeScript Project References](https://www.typescriptlang.org/docs/handbook/project-references.html) to address said problems but end up wasting your time tediously maintaining references between modules.
+3. Or you use [TypeScript Project References](https://www.typescriptlang.org/docs/handbook/project-references.html) to address said problems but spend your time tediously maintaining references between modules.
 
-tsrf solves this dilemma by automatically detecting and updating references for you, so you can have accuracy, performance and time to work on what's important.
+tsrf solves this dilemma by automatically detecting and updating references so you can have accuracy, performance, and time to work on what's important.
 
 Additionally, it maintains module dependencies so you don't have to add a workspace module to `package.json` every time you start using it.
 
@@ -36,7 +36,7 @@ Now run the doctor command to check the compatibility and required changes:
 npx tsrf doctor
 ```
 
-It will give you a breakdown of required changes, that can be made via `doctor --fix`:
+It will give you a breakdown of required changes that can be made via `doctor --fix`:
 
 ```bash
 npx tsrf doctor --fix
@@ -54,7 +54,7 @@ It [will patch the project configs](#what-it-does) to match the necessary settin
 
 tsrf wraps the TypeScript compiler and updates references in the background using the build information reported by TypeScript.
 
-You simply run `tsrf` instead of `tsc --build --watch` and tsrf will do the rest.
+You simply run `tsrf` instead of `tsc --build --watch`, and tsrf will do the rest.
 
 ### What it does:
 
