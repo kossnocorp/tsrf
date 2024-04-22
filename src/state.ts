@@ -14,7 +14,7 @@ export namespace State {
 
   export const root = process.cwd();
   export const rootPackagePath = "package.json" as Package.PackagePath;
-  export const rootTSConfigPath = "tsconfig.json" as TSConfig.TSConfigPath;
+  export const rootTSConfigPath = "tsconfig.tsrf.json" as TSConfig.TSConfigPath;
 
   // State
   export const workspaceRequirements = new Map<

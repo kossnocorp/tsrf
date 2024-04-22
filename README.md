@@ -58,9 +58,9 @@ You simply run `tsrf` instead of `tsc --build --watch`, and tsrf will do the res
 
 ### What it does:
 
-1. It updates the root `tsconfig.json` and updates the [`references`](https://www.typescriptlang.org/tsconfig#references) to include all [matching modules](#what-is-a-matching-module) within [the workspaces specified in the `package.json`](https://docs.npmjs.com/cli/using-npm/workspaces). tsrf also updates the config settings to make the references work properly.
+1. It creates `tsconfig.tsrf.json` in the project's root and assigns the [`references`](https://www.typescriptlang.org/tsconfig#references) to include all [matching modules](#what-is-a-matching-module) within [the workspaces specified in the `package.json`](https://docs.npmjs.com/cli/using-npm/workspaces).
 
-2. It updates `references` and path aliases in each [matching module](#what-is-a-matching-module) `tsconfig.json` using the dependencies tree parsed from the build info provided by the compiler. Just like with the root config, tsrf also makes sure the config settings are properly set.
+2. It updates `references` and `path` aliases in each [matching module](#what-is-a-matching-module) `tsconfig.json` using the dependencies tree parsed from the build info provided by the compiler. tsrf also sets the required settings.
 
 3. It updates `package.json` dependencies and adds missing workspace modules when you start using one.
 
@@ -68,7 +68,7 @@ You simply run `tsrf` instead of `tsc --build --watch`, and tsrf will do the res
 
 ### Can I use it with a monorepo build tool?
 
-I personally use it with [Turborepo](https://turbo.build/repo) and I'm sure you can use it with any or no monorepo build tool at all.
+I personally use it with [Turborepo](https://turbo.build/repo), and I'm sure you can use it with any or no monorepo build tool at all.
 
 ### What is a matching module?
 

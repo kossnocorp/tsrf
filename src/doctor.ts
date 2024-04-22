@@ -38,7 +38,7 @@ async function checkRootPackage() {
   const rootPackage = await Package.readPackage(State.rootPackagePath).catch(
     () => {
       Utils.error(
-        "The root package.json please change the directory or create the package.json with workspaces"
+        "The root package.json is not found, please change the directory or create the package.json with workspaces"
       );
       process.exit(1);
     }
@@ -46,7 +46,7 @@ async function checkRootPackage() {
 
   if (!rootPackage.workspaces) {
     Utils.error(
-      "The root package.json workspaces field is missing please add it. See: https://docs.npmjs.com/cli/using-npm/workspaces"
+      "The root package.json workspaces field is missing, please add it. See: https://docs.npmjs.com/cli/using-npm/workspaces"
     );
     process.exit(1);
   }

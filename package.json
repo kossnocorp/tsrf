@@ -1,6 +1,6 @@
 {
   "name": "tsrf",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Build tool that marries npm workspaces with TypeScript references",
   "main": "index.js",
   "bin": {

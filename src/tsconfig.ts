@@ -181,7 +181,9 @@ export namespace TSConfig {
   export function getTSConfigPath(workspace?: Workspaces.WorkspacePath) {
     return relative(
       State.root,
-      resolve(workspace || "./", "tsconfig.json")
+      !workspace
+        ? State.rootTSConfigPath
+        : resolve(workspace || "./", "tsconfig.json")
     ) as TSConfigPath;
   }
 
@@ -301,7 +303,7 @@ export namespace TSConfig {
         tsConfig.files = [];
         tsConfig.references = references;
 
-        if (!silent) Utils.log("Configured the root tsconfig.json");
+        if (!silent) Utils.log(`Configured the root ${State.rootTSConfigPath}`);
       },
       () => Utils.cloneDeepJSON(defaultRootTSConfig)
     );

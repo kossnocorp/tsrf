@@ -42,10 +42,14 @@ function stopAllChildren() {
 /// tsc
 
 function startTSC() {
-  const tscChild = spawn("tsc", ["--build", "--watch", "--pretty"], {
-    cwd: State.root,
-    shell: true,
-  });
+  const tscChild = spawn(
+    "npx",
+    ["tsc", "--build", State.rootTSConfigPath, "--watch", "--pretty"],
+    {
+      cwd: State.root,
+      shell: true,
+    }
+  );
 
   children.add(tscChild);
 
